@@ -1,0 +1,17 @@
+# Schema validation
+pydantic>=2.0
+pydantic-settings>=2.0
+
+# Agent orchestration
+langgraph>=0.2
+langchain>=0.3
+
+# Databricks
+databricks-sdk>=0.30
+databricks-sql-connector>=3.0
+
+# Data tooling
+pandas>=2.0
+
+# Env loading
+python-dotenv>=1.0
