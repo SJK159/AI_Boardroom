@@ -1,3 +1,4 @@
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -41,10 +42,30 @@ class BossAgent:
         self._synthesis_llm = llm.with_structured_output(SynthesisOutput)
         self._graph = self._build_graph()
 
+    @staticmethod
+    def _invoke_with_retry(structured_llm, messages, max_attempts: int = 3):
+        """Retry wrapper for structured-output LLM calls.
+
+        GPT OSS 20B on Groq occasionally hallucinates a mismatched tool call during
+        structured output (observed: 'attempted to call tool synthesisOutput which was
+        not in request.tools') - a known reliability quirk of smaller open-weight models
+        under strict function-calling, not a bug in the prompt or schema. Retrying the
+        exact same call has consistently succeeded within 1-2 attempts in practice.
+        """
+        last_error = None
+        for attempt in range(max_attempts):
+            try:
+                return structured_llm.invoke(messages)
+            except Exception as e:
+                last_error = e
+                if attempt < max_attempts - 1:
+                    time.sleep(1.5 * (attempt + 1))
+        raise last_error
+
     def _select_specialists(self, state: BossState) -> dict:
         specialists = {a.value: e.description for a, e in AVAILABLE_SPECIALISTS.items()}
         prompt = build_selection_prompt(state["query"], specialists)
-        result: AgentSelection = self._selection_llm.invoke([
+        result: AgentSelection = self._invoke_with_retry(self._selection_llm, [
             SystemMessage(content=SELECTION_SYSTEM_PROMPT),
             HumanMessage(content=prompt),
         ])
@@ -70,7 +91,7 @@ class BossAgent:
     def _synthesize(self, state: BossState) -> dict:
         briefings_text = _format_briefings(state["briefings"])
         prompt = build_synthesis_prompt(state["query"], briefings_text)
-        result: SynthesisOutput = self._synthesis_llm.invoke([
+        result: SynthesisOutput = self._invoke_with_retry(self._synthesis_llm, [
             SystemMessage(content=SYNTHESIS_SYSTEM_PROMPT),
             HumanMessage(content=prompt),
         ])

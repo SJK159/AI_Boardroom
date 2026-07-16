@@ -187,6 +187,9 @@ backend/
 │   ├── operations/       Fourth specialist agent, fully implemented
 │   │   ├── tools.py        7 tools — delivery delay, seller reliability, fulfillment bottlenecks
 │   │   └── agent.py        OperationsAgent — turns tool output into Finding objects
+│   ├── growth/           Fifth specialist agent, fully implemented
+│   │   ├── tools.py        7 tools — regional/category growth, acquisition, product-gap proxy
+│   │   └── agent.py        GrowthAgent — turns tool output into Finding objects
 │   └── boss/            Orchestrator — no domain tools, LLM-driven
 │       ├── registry.py     AVAILABLE_SPECIALISTS — the one place that grows per new agent
 │       ├── llm_outputs.py  Structured-output shapes the boss LLM must return
@@ -411,6 +414,61 @@ Operations/Sentiment) — the mechanism isn't a one-off, it holds as the roster 
 
 Run it yourself: [`notebooks/06_operations_agent_demo.ipynb`](notebooks/06_operations_agent_demo.ipynb)
 
+### 4.9 Growth Agent — fifth specialist, and a real Groq reliability fix
+
+| Tool | Computes | Data reality |
+|---|---|---|
+| `regional_sales_breakdown` | Revenue + order count by customer state | Computed directly |
+| `market_expansion_signals` | States with strongest revenue growth (recent 6mo vs. prior 6mo) | Filters out small-base noise — see below |
+| `category_growth_rate` | Category revenue growth, same 6mo/6mo window | Same small-base filter |
+| `customer_acquisition_trend` | New customers per month (first-order date, person-level) | Trailing-cutoff aware (reuses the Sales-agent fix) |
+| `underperforming_region_diagnosis` | States with declining revenue | Same small-base filter, inverse direction |
+| `new_seller_onboarding_rate` | New sellers per month (first-order date) | Trailing-cutoff aware |
+| `product_gap_analysis` | Revenue-per-seller by category (supply/demand proxy) | **Explicitly not true product-gap analysis** — see below |
+
+**Shared infrastructure**: every trend tool here calls `_get_analysis_cutoff()` once, which
+reuses the same median-based heuristic Sales' `query_revenue_by_period` introduced to detect
+Olist's September 2018 data-collection cutoff, rather than re-deriving the fix per tool.
+
+**A third real bug — small-base noise, not a data-quality defect this time.** The first version
+of `market_expansion_signals()` reported **RR at 827.96% growth** as the strongest signal. The
+raw numbers: RR's prior-period revenue was R$656.61 — a percentage computed off a near-empty
+base isn't a real trend, it's noise. `category_growth_rate()` had the identical problem: music
+showed 4849.52% growth off a R$79.87 base. Both tools (plus `underperforming_region_diagnosis`,
+same issue in the opposite direction) now filter out entries below a minimum prior-period
+revenue threshold before ranking — the same `min_reviews`/`min_orders` guard pattern already
+used in Sentiment and Operations for this exact class of problem.
+
+**`product_gap_analysis`** is the tool CLAUDE.md explicitly calls out in advance as the
+weakest fit for this dataset: true product-gap/whitespace analysis needs external market data
+— visibility into demand for products never listed on the platform at all, which a
+transactions-only dataset cannot provide. What's implemented is a supply/demand imbalance proxy
+*within* existing categories (revenue-per-seller, flagging under- vs. over-supplied
+categories), and the tool's own output says so rather than presenting it as real whitespace
+analysis.
+
+**A real boss-agent reliability bug, found and fixed**: while running this notebook, the boss
+agent's synthesis step failed with `BadRequestError: Tool call validation failed: attempted to
+call tool 'synthesisOutput' which was not in request.tools`. This is a known reliability quirk
+of smaller open-weight models (GPT OSS 20B here) under strict structured-output/function-calling
+— the model occasionally hallucinates a slightly mismatched tool name. It reproduced
+intermittently (failed once, succeeded on an immediate identical retry), which is the signature
+of a transient model-level issue rather than a schema or prompt bug. `BossAgent` now wraps both
+structured-output LLM calls (`_select_specialists`, `_synthesize`) in a retry helper
+(`_invoke_with_retry`, up to 3 attempts with backoff) rather than letting one flaky call break
+the whole pipeline — standard practice for a known-flaky external dependency, not a workaround
+for something actually wrong in our code.
+
+**Cross-agent synthesis, no forced dissent this time** — asking *"Which regions should we
+invest in for growth, and can we support that operationally?"* correctly invoked Growth and
+Operations together, and the synthesis didn't fabricate a conflict where there wasn't one — it
+combined Growth's expansion signal (PI, +68.7%) with Operations' capacity constraints (9.33-day
+transit bottleneck, higher interstate freight cost) into a genuinely useful "invest here, but
+fix this operational gap first" recommendation. Complementary, not contradictory — a good sign
+the synthesis isn't manufacturing dissent just because it's primed to look for it.
+
+Run it yourself: [`notebooks/07_growth_agent_demo.ipynb`](notebooks/07_growth_agent_demo.ipynb)
+
 ---
 
 ## 5. Tools & Stack
@@ -482,7 +540,7 @@ Per the build order in `CLAUDE.md`:
 2. ~~Databricks connection + Olist data ingestion into Delta tables~~ ✅
 3. ~~Finance Agent end-to-end, all 7 tools~~ ✅
 4. ~~Boss agent skeleton (LangGraph supervisor), wired to Finance Agent~~ ✅
-5. Remaining specialist agents — Sentiment ✅, Sales ✅, Operations ✅, **Growth, Risk, Compliance/HR remaining** ← next
+5. Remaining specialist agents — Sentiment ✅, Sales ✅, Operations ✅, Growth ✅, **Risk, Compliance/HR remaining** ← next
 6. RAG layer (Vector Search) for Sentiment Agent + simulated institutional docs for Compliance
 7. Governance logging middleware persistence + MongoDB
 8. MERN frontend + streaming + WebSocket agent status
