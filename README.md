@@ -73,18 +73,18 @@ Five layers, data flows bottom-up into agents, then top-down as a synthesized an
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Current build status**: layer 1 (data) is live. Layer 4 has its first specialist (Finance)
-working end-to-end against real data, plus a working boss agent orchestrating it. Layers 2, 3,
-and 5 are not built yet.
+**Current build status**: layer 1 (data) is live. Layer 4 is complete — all 7 specialists
+working end-to-end against real data, orchestrated by a working boss agent. Layers 2, 3, and 5
+are not built yet.
 
-### Query-time flow (as built — 1 of 7 specialists wired up)
+### Query-time flow (as built — all 7 specialists wired up)
 
 ```
 User query
   → Boss Agent (LangGraph graph, Groq-hosted LLM) parses intent
   → Boss Agent selects relevant specialist agents from its registry
-      (currently: Finance only — the registry is the single place
-       that grows as more specialists get built)
+      (Finance, Sentiment, Sales, Operations, Growth, Risk, Compliance/HR —
+       the registry is the single place specialist availability is declared)
   → Selected agents run in PARALLEL (thread pool), each invoking its own tools
   → Each agent produces a validated AgentBriefing
   → Boss Agent collects all briefings, detects disagreement,
@@ -95,14 +95,15 @@ User query
 ### What exists right now
 
 ```
-notebooks/03_boss_agent_demo.ipynb
+notebooks/09_compliance_agent_demo.ipynb  (or any of notebooks/03-09)
   → BossAgent.run(query)
       → select_specialists node: LLM decides which registered specialists apply
           → (if none apply, short-circuits to a "no relevant agent" response)
       → run_specialists node: parallel .run(query) calls, one per selected specialist
-          → FinanceAgent.run(query)
-              → analyze() calls all 7 finance tools via _call_tool()
-                  → each tool runs SQL against Delta tables through DatabricksClient
+          → e.g. FinanceAgent.run(query)
+              → analyze() calls all of that agent's tools via _call_tool()
+                  → each tool runs SQL (or, for Compliance, local document lookups)
+                    through DatabricksClient
                   → every call is logged as a ToolCallRecord (success/failure, timing)
               → results become Finding objects (claim + source + confidence)
               → returns a validated AgentBriefing
@@ -140,9 +141,11 @@ photo count), not unit cost. There is also **no explicit payment-failure or refu
 that touches these gaps says so explicitly in its output rather than fabricating a number —
 this is a deliberate governance choice (see section 6 of the project spec, `CLAUDE.md`).
 
-Supplementary institutional documents (fictional HR policy, vendor contracts, company
-registration for a wrapper entity "Olist Inc.") are planned for the Compliance/HR agent but
-**not built yet** — they'll be created when that agent is built, not fabricated in advance.
+Supplementary institutional documents (fictional HR policy, vendor contract, company
+registration for a wrapper entity "Olist Inc.") are **built** — created alongside the
+Compliance/HR agent per CLAUDE.md's instruction to build them "once we're hands-on with the
+data," not fabricated in advance. They live at `backend/agents/compliance/documents/` as local
+markdown, parsed by section header — see section 4.11.
 
 ---
 
@@ -193,6 +196,11 @@ backend/
 │   ├── risk/             Sixth specialist agent, fully implemented
 │   │   ├── tools.py        7 tools — cancellations, disputes, churn, concentration, fraud signals
 │   │   └── agent.py        RiskAgent — turns tool output into Finding objects
+│   ├── compliance/       Seventh specialist agent, fully implemented - ROSTER COMPLETE
+│   │   ├── documents/      3 fictional institutional docs (registration, HR policy, contract)
+│   │   ├── document_loader.py  Section-based markdown parser (clause-addressable text)
+│   │   ├── tools.py        7 tools — doc fact retrieval + the flagship SLA cross-reference
+│   │   └── agent.py        ComplianceAgent — turns tool output into Finding objects
 │   └── boss/            Orchestrator — no domain tools, LLM-driven
 │       ├── registry.py     AVAILABLE_SPECIALISTS — the one place that grows per new agent
 │       ├── llm_outputs.py  Structured-output shapes the boss LLM must return
@@ -515,6 +523,60 @@ specialists grows.
 
 Run it yourself: [`notebooks/08_risk_agent_demo.ipynb`](notebooks/08_risk_agent_demo.ipynb)
 
+### 4.11 Compliance/HR Agent — seventh and final specialist, roster complete
+
+Architecturally different from the other six: instead of computing metrics from Delta tables,
+most of its tools do **precision fact retrieval** against three fictional institutional
+documents built specifically for this agent (per CLAUDE.md section 2, a wrapper entity
+"Olist Inc." — not real company data): `company_registration.md`, `hr_policy.md`, and
+`vendor_contract.md`, stored as local markdown and parsed by section header
+(`backend/agents/compliance/document_loader.py`).
+
+| Tool | Computes | Data reality |
+|---|---|---|
+| `search_policy_docs` | Keyword search across all 3 documents | Proxy for real semantic search — Vector Search with `doc_type` metadata tagging (a separate collection from reviews, per CLAUDE.md) is build-order step 6, not built yet |
+| `get_company_registration_info` | All registration fields | Direct structured lookup — exactly the "precision fact-retrieval, not pattern retrieval" CLAUDE.md calls for with these docs |
+| `check_contract_clause` | Looks up a clause by topic for a seller | All sellers share ONE standard template — no bespoke per-vendor contracts exist. `vendor` validates the seller_id and is accepted for interface consistency with a future state where addenda might exist |
+| `check_policy_compliance` | Looks up whether an HR topic is documented | Direct structured lookup |
+| `contract_expiry_tracker` | Sellers approaching their annual contract renewal | Renewal date computed from REAL seller onboarding dates (first order date) + the contract's stated annual cadence |
+| `policy_gap_analysis` | Which expected HR topics are missing | **Deliberately finds real gaps** — see below |
+| `cross_reference_sla_compliance` | Seller's actual on-time % vs. the contractual SLA threshold | **The flagship cross-agent tool** — see below |
+
+**A deliberately incomplete HR policy.** The document covers 5 of 9 standard topics; four are
+missing on purpose — Data Privacy Policy, Anti-Discrimination & Equal Opportunity, Remote Work
+Policy, Grievance Procedure. If every topic were present, `policy_gap_analysis()` would always
+return "no gaps," which demonstrates nothing. The tool's scope is explicitly bounded: it only
+reports documentation coverage, never recommends or makes employment decisions — matching
+CLAUDE.md section 6's explicit carve-out for this agent around anything resembling employment
+decisions (EU AI Act high-risk category).
+
+**The flagship cross-agent tool, working as designed.** CLAUDE.md calls this tool out
+specifically: *"No single agent can answer this alone... the strongest demo of why the
+multi-agent design earns its complexity."* `cross_reference_sla_compliance()`:
+
+1. Parses the SLA threshold directly out of the contract text via regex (`no less than 85%`)
+   rather than hardcoding a duplicate number, so the check stays in sync if the contract
+   document ever changes.
+2. Computes a specific seller's actual on-time delivery rate directly against the Delta
+   tables, using the same on-time definition as Operations' `calculate_delivery_delay` /
+   `seller_performance_score` — kept self-contained per this codebase's convention (no
+   cross-package Python import), but the same underlying methodology.
+3. Verdicts compliant/breach — something neither agent's tools could answer alone: Operations
+   has no notion of a contractual threshold, and Compliance computes no delivery metrics
+   anywhere else.
+
+**Verified live**: the platform's highest-volume seller achieved **93.79% on-time delivery**
+against an **85.0%** contractual threshold — parsed straight from the document — correctly
+verdicted `compliant: True`.
+
+**Roster-complete synthesis** — asking *"Is our top seller compliant with their contract, and
+what's the financial exposure if they're not?"* correctly invoked Compliance and Finance
+together, verified the seller's SLA compliance, and pulled in Finance's revenue-anomaly and
+COGS-gap findings to give a complete (if partially uncertain, due to the still-missing COGS
+data) picture of financial exposure — with accurate per-claim tool citations throughout.
+
+Run it yourself: [`notebooks/09_compliance_agent_demo.ipynb`](notebooks/09_compliance_agent_demo.ipynb)
+
 ---
 
 ## 5. Tools & Stack
@@ -586,8 +648,8 @@ Per the build order in `CLAUDE.md`:
 2. ~~Databricks connection + Olist data ingestion into Delta tables~~ ✅
 3. ~~Finance Agent end-to-end, all 7 tools~~ ✅
 4. ~~Boss agent skeleton (LangGraph supervisor), wired to Finance Agent~~ ✅
-5. Remaining specialist agents — Sentiment ✅, Sales ✅, Operations ✅, Growth ✅, Risk ✅, **Compliance/HR remaining** ← next
-6. RAG layer (Vector Search) for Sentiment Agent + simulated institutional docs for Compliance
+5. ~~Remaining specialist agents~~ ✅ — Sentiment, Sales, Operations, Growth, Risk, Compliance/HR all built. **All 7 specialists complete.**
+6. RAG layer (Databricks Vector Search) — real semantic search to replace the keyword-match proxies in `search_reviews()` (Sentiment) and `search_policy_docs()` (Compliance); institutional docs already built as part of Compliance ← next
 7. Governance logging middleware persistence + MongoDB
 8. MERN frontend + streaming + WebSocket agent status
 9. Eval suite

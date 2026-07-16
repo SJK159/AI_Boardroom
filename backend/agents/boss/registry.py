@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Type
 
 from backend.agents.base_agent import SpecialistAgent
+from backend.agents.compliance import ComplianceAgent
 from backend.agents.finance import FinanceAgent
 from backend.agents.growth import GrowthAgent
 from backend.agents.operations import OperationsAgent
@@ -48,6 +49,16 @@ AVAILABLE_SPECIALISTS: dict[AgentType, SpecialistEntry] = {
             "order fulfillment funnel drop-off, repeat purchase rate, seasonal patterns, "
             "and cross-sell category pairs. Draws from orders, order_items, customers, "
             "and products."
+        ),
+    ),
+    AgentType.COMPLIANCE: SpecialistEntry(
+        agent_class=ComplianceAgent,
+        description=(
+            "Institutional document fact retrieval: company registration status, HR policy "
+            "coverage and gaps, seller contract clauses, contract renewal tracking, and "
+            "seller SLA compliance (cross-references actual delivery performance against "
+            "the contractual on-time threshold). Draws from local policy/contract documents "
+            "plus orders, order_items, and sellers."
         ),
     ),
     AgentType.GROWTH: SpecialistEntry(
