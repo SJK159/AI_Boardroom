@@ -5,6 +5,7 @@ pydantic-settings>=2.0
 # Agent orchestration
 langgraph>=0.2
 langchain>=0.3
+langchain-groq>=0.2
 
 # Databricks
 databricks-sdk>=0.30
@@ -15,3 +16,7 @@ pandas>=2.0
 
 # Env loading
 python-dotenv>=1.0
+
+# Notebooks
+jupyter>=1.0
+ipykernel>=6.0

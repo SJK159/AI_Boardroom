@@ -17,5 +17,8 @@ class Settings(BaseSettings):
     databricks_schema: str = "olist"
     databricks_warehouse_id: str | None = None
 
+    groq_api_key: str | None = None
+    boss_llm_model: str = "llama-3.3-70b-versatile"
+
 
 settings = Settings()

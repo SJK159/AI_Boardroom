@@ -73,32 +73,42 @@ Five layers, data flows bottom-up into agents, then top-down as a synthesized an
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Current build status**: layer 1 (data) is live, layer 4 has its first specialist (Finance)
-working end-to-end against real data. Layers 2, 3, 5 and the boss agent are not built yet.
+**Current build status**: layer 1 (data) is live. Layer 4 has its first specialist (Finance)
+working end-to-end against real data, plus a working boss agent orchestrating it. Layers 2, 3,
+and 5 are not built yet.
 
-### Query-time flow (target — boss agent not built yet)
+### Query-time flow (as built — 1 of 7 specialists wired up)
 
 ```
 User query
-  → Boss Agent parses intent
-  → Boss Agent selects relevant specialist agents
-  → Selected agents run in PARALLEL, each invoking its own tools
+  → Boss Agent (LangGraph graph, Groq-hosted LLM) parses intent
+  → Boss Agent selects relevant specialist agents from its registry
+      (currently: Finance only — the registry is the single place
+       that grows as more specialists get built)
+  → Selected agents run in PARALLEL (thread pool), each invoking its own tools
   → Each agent produces a validated AgentBriefing
   → Boss Agent collects all briefings, detects disagreement,
     synthesizes into a board memo with citations
-  → Streamed to UX layer
+  → Returns a validated BoardRecommendation (requires_human_approval = True)
 ```
 
-### What exists right now (this session's flow)
+### What exists right now
 
 ```
-scripts/run_finance_agent.py
-  → FinanceAgent.run(query)
-      → analyze() calls all 7 finance tools via _call_tool()
-          → each tool runs SQL against Delta tables through DatabricksClient
-          → every call is logged as a ToolCallRecord (success/failure, timing)
-      → results become Finding objects (claim + source + confidence)
-  → returns a validated AgentBriefing (Pydantic-checked)
+notebooks/03_boss_agent_demo.ipynb
+  → BossAgent.run(query)
+      → select_specialists node: LLM decides which registered specialists apply
+          → (if none apply, short-circuits to a "no relevant agent" response)
+      → run_specialists node: parallel .run(query) calls, one per selected specialist
+          → FinanceAgent.run(query)
+              → analyze() calls all 7 finance tools via _call_tool()
+                  → each tool runs SQL against Delta tables through DatabricksClient
+                  → every call is logged as a ToolCallRecord (success/failure, timing)
+              → results become Finding objects (claim + source + confidence)
+              → returns a validated AgentBriefing
+      → synthesize node: LLM writes the board memo from all briefings,
+        flags dissent between agents, sets overall confidence + action items
+  → returns a validated BoardRecommendation
 ```
 
 ---
@@ -147,7 +157,7 @@ registration for a wrapper entity "Olist Inc.") are planned for the Compliance/H
 - All 9 Delta tables created via a **serverless SQL warehouse** using `read_files()` +
   `CREATE TABLE ... AS SELECT` (no cluster needed — the workspace has no cluster compute
   policy configured, so this was also the only viable path)
-- Script: [`scripts/ingest_to_databricks.py`](scripts/ingest_to_databricks.py)
+- Notebook: [`notebooks/01_data_ingestion.ipynb`](notebooks/01_data_ingestion.ipynb)
 
 ### 4.2 Backend scaffolding
 
@@ -165,9 +175,15 @@ backend/
 │   └── databricks_client.py   Thin SQL wrapper — the ONLY file that talks to the Databricks SDK
 ├── agents/
 │   ├── base_agent.py   SpecialistAgent abstract base class (see below)
-│   └── finance/         First specialist agent, fully implemented
-│       ├── tools.py        7 tools, pure functions, each returns raw computed data
-│       └── agent.py        FinanceAgent — turns tool output into Finding objects
+│   ├── finance/         First specialist agent, fully implemented
+│   │   ├── tools.py        7 tools, pure functions, each returns raw computed data
+│   │   └── agent.py        FinanceAgent — turns tool output into Finding objects
+│   └── boss/            Orchestrator — no domain tools, LLM-driven
+│       ├── registry.py     AVAILABLE_SPECIALISTS — the one place that grows per new agent
+│       ├── llm_outputs.py  Structured-output shapes the boss LLM must return
+│       ├── prompts.py      Selection + synthesis prompt templates
+│       ├── state.py        BossState — shared state across the LangGraph graph
+│       └── graph.py        BossAgent — builds and runs the 3-node LangGraph graph
 ```
 
 **Why schemas are split by file, not one giant `schemas.py`**: `Finding`/`ToolCallRecord` →
@@ -236,7 +252,47 @@ Every finding carries a `confidence` score (lower for proxy-based tools like
 at 0.9) and a `source` field naming the exact tool that produced it — this is the traceability
 requirement from the governance spec, not an afterthought.
 
-Run it yourself: `python scripts/run_finance_agent.py`
+Run it yourself: [`notebooks/02_finance_agent_demo.ipynb`](notebooks/02_finance_agent_demo.ipynb)
+
+### 4.5 Boss Agent — LangGraph orchestration, wired to Finance
+
+The boss agent has no domain tools of its own. It's a 3-node LangGraph graph:
+
+```
+select_specialists  →  run_specialists  →  synthesize
+       │
+       └─ (if none selected) → no_relevant_agents → END
+```
+
+- **`select_specialists`**: an LLM call reads the query plus the roster from
+  `registry.AVAILABLE_SPECIALISTS` (currently: Finance only) and returns which specialists are
+  actually relevant, via structured output (`AgentSelection` Pydantic model — not a raw string
+  the code has to parse). If none apply, the graph short-circuits rather than forcing an
+  irrelevant specialist to answer.
+- **`run_specialists`**: invokes `.run(query)` on every selected specialist through a
+  `ThreadPoolExecutor` — parallel by construction, even though there's only one specialist to
+  parallelize today. Adding specialist #2 doesn't touch this node.
+- **`synthesize`**: a second LLM call takes every `AgentBriefing`, writes the board memo, and
+  is explicitly prompted to flag disagreement between agents as a `Dissent` rather than
+  smoothing it into consensus. Also structured output (`SynthesisOutput`).
+
+**Why a registry, not a fixed agent list**: `AVAILABLE_SPECIALISTS` in
+`backend/agents/boss/registry.py` is the *only* place the boss agent knows what specialists
+exist. The selection LLM is only ever shown agents actually in that dict, so it can never route
+a query to a specialist that isn't implemented yet. Adding Sales next session is one dict entry
+here — nothing else in the boss agent changes.
+
+**Why Groq, not a paid hosted API**: CLAUDE.md's spec calls for "a stronger hosted LLM... NOT
+the local SLM" for the boss agent, since it only runs once per session rather than once per
+tool call. That's still true with Groq — the point is a *hosted*, *capable* model separate from
+the lightweight local SLM layer, not necessarily the most expensive one. Groq's free tier
+serves Llama 3.3 70B fast enough for orchestration and synthesis, without burning money on
+every test run during active development. This can be swapped for Anthropic/OpenAI later by
+changing one line in `graph.py` — nothing else depends on which provider `ChatGroq` becomes.
+
+Run it yourself: [`notebooks/03_boss_agent_demo.ipynb`](notebooks/03_boss_agent_demo.ipynb) —
+includes a second query deliberately outside Finance's domain, to demonstrate that agent
+selection is a real decision and not a rubber stamp.
 
 ---
 
@@ -251,7 +307,9 @@ Run it yourself: `python scripts/run_finance_agent.py`
 | Settings | **pydantic-settings** | Single source of truth for env vars, loaded from `.env` |
 | Numerics | **NumPy** | z-score anomaly detection, linear regression for cash-flow forecast |
 | Language | **Python 3.14** | |
-| Agent orchestration (planned) | **LangGraph** | Supervisor/multi-agent pattern — boss agent not built yet |
+| Agent orchestration | **LangGraph** | Boss agent's 3-node supervisor graph |
+| Boss LLM | **Groq (Llama 3.3 70B) via `langchain-groq`** | Free tier — intent selection + synthesis, swappable for a paid provider later behind the same interface |
+| Notebooks | **Jupyter + nbformat** | All runnable/demo scripts live as notebooks with markdown walkthroughs (`notebooks/`), not bare `.py` scripts — production code stays in `backend/` |
 | SLM (planned) | **Ollama + qwen2.5:7b-instruct** | Briefing compression layer — not built yet |
 | Frontend (planned) | **React (MERN) + Socket.io** | Not built yet |
 
@@ -263,9 +321,9 @@ Four pillars from the project spec, and what's actually implemented today:
 
 | Pillar | Status |
 |---|---|
-| **Transparency** | Every `Finding` carries `confidence` + `severity`. Proxy-based tools (payment failure, refunds, margin) explicitly say so in their output rather than presenting estimates as facts. |
+| **Transparency** | Every `Finding` carries `confidence` + `severity`. Proxy-based tools (payment failure, refunds, margin) explicitly say so in their output rather than presenting estimates as facts. The synthesis LLM is explicitly prompted to record `Dissent`s rather than flatten disagreement into consensus — not yet demonstrable with only one specialist registered, but the mechanism is live. |
 | **Traceability** | Every `Finding.source` names the exact tool that produced it. Every tool call — args, output, timing, success/failure — is captured in `ToolCallRecord`, automatically, via the base class. |
-| **Human Oversight** | `BoardRecommendation.requires_human_approval` defaults to `True` (schema-level, not agent-level — can't be silently skipped). Boss agent not built yet, so this isn't exercised end-to-end yet, but the schema enforces it going forward. |
+| **Human Oversight** | `BoardRecommendation.requires_human_approval` defaults to `True` (schema-level, not agent-level — can't be silently skipped). Now exercised end-to-end: every `BossAgent.run()` call produces a recommendation, never an auto-executed action. |
 | **Accountability** | `GovernanceLog` schema exists to capture full session audit trails (query, agents invoked, findings, model versions, human decision). Not yet wired into a persistence layer (MongoDB — planned, not built). |
 
 ---
@@ -279,13 +337,23 @@ DATABRICKS_HOST=https://your-workspace.cloud.databricks.com
 DATABRICKS_TOKEN=your_personal_access_token
 KAGGLE_USERNAME=your_kaggle_username
 KAGGLE_API_KEY=your_kaggle_key
+GROQ_API_KEY=your_groq_key            # free at console.groq.com — needed for the boss agent
 ```
 
 ```bash
 pip install -r requirements.txt
-python scripts/ingest_to_databricks.py    # one-time: pull data + create Delta tables
-python scripts/run_finance_agent.py       # run the Finance Agent against live data
+jupyter notebook notebooks/            # open and run in order:
+                                        #   01_data_ingestion.ipynb   (one-time: pull data + create Delta tables)
+                                        #   02_finance_agent_demo.ipynb
+                                        #   03_boss_agent_demo.ipynb
 ```
+
+**Why notebooks for the runnable/demo layer, `.py` for everything importable**: `backend/`
+holds code that other code imports — `FinanceAgent` is imported by `BossAgent`, which will
+later be imported by a FastAPI route. That has to stay as clean, diffable, importable modules.
+The `notebooks/` scripts are standalone demos nothing else imports, and benefit from inline
+markdown explaining *why* each step happens plus visible output — exactly what notebooks are
+good at and plain scripts aren't.
 
 ---
 
@@ -296,8 +364,8 @@ Per the build order in `CLAUDE.md`:
 1. ~~Repo scaffolding + Pydantic schemas + base `SpecialistAgent` class~~ ✅
 2. ~~Databricks connection + Olist data ingestion into Delta tables~~ ✅
 3. ~~Finance Agent end-to-end, all 7 tools~~ ✅
-4. **Boss agent skeleton (LangGraph supervisor), wired to Finance Agent** ← next
-5. Remaining 6 specialist agents (Sales, Sentiment, Operations, Growth, Risk, Compliance/HR)
+4. ~~Boss agent skeleton (LangGraph supervisor), wired to Finance Agent~~ ✅
+5. **Remaining 6 specialist agents (Sales, Sentiment, Operations, Growth, Risk, Compliance/HR)** ← next
 6. RAG layer (Vector Search) for Sentiment Agent + simulated institutional docs for Compliance
 7. Governance logging middleware persistence + MongoDB
 8. MERN frontend + streaming + WebSocket agent status
