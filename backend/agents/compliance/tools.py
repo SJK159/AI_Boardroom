@@ -2,10 +2,10 @@
 
 Data reality notes (flagged explicitly per tool output, not hidden):
 
-1. search_policy_docs() is a keyword-match proxy over the local documents, same treatment as
-   Sentiment's search_reviews() and for the same reason - real Vector Search (with doc_type
-   metadata tagging, a separate collection from reviews per CLAUDE.md section 2) is scoped to
-   build order step 6, not built yet.
+1. search_policy_docs() does real semantic search via the local RAG layer (backend/rag/),
+   in its own collection separate from the reviews index per CLAUDE.md section 2 - different
+   metadata shape (doc_type: policy|registration|contract vs. reviews' review_id/order_id).
+   Requires the policy index to be built first - see notebooks/10_rag_index_build.ipynb.
 2. check_contract_clause() accepts a `vendor` (seller_id) parameter, but all sellers currently
    operate under ONE standard agreement template - there are no per-vendor bespoke contracts in
    this dataset. The parameter validates the seller exists and is accepted for interface
@@ -29,7 +29,7 @@ from datetime import datetime, timedelta
 
 from backend.db import DatabricksClient
 
-from .document_loader import find_section, load_all_documents, load_document
+from .document_loader import find_section, load_document
 
 EXPECTED_HR_TOPICS = [
     "Employment Classifications",
@@ -48,24 +48,17 @@ def _escape(s: str) -> str:
     return s.replace("'", "''")[:200]
 
 
-def search_policy_docs(db: DatabricksClient, query: str, limit: int = 5) -> dict:
-    """Keyword search across all institutional documents - a proxy for real semantic search."""
-    query_lower = query.lower()
-    matches = []
-    for doc in load_all_documents():
-        for header, body in doc["sections"].items():
-            if query_lower in header.lower() or query_lower in body.lower():
-                matches.append({
-                    "doc_type": doc["doc_type"],
-                    "document": doc["title"],
-                    "section": header,
-                    "excerpt": body[:300],
-                })
+def search_policy_docs(db: DatabricksClient, query: str, limit: int = 5, min_score: float = 0.35) -> dict:
+    """Semantic search across all institutional documents via the local RAG index."""
+    from backend.rag import get_policy_index
+
+    index = get_policy_index()
+    matches = index.search(query, top_k=limit, min_score=min_score)
     return {
         "query": query,
-        "matches": matches[:limit],
+        "matches": matches,
         "match_count": len(matches),
-        "note": "literal keyword match across institutional documents, not semantic/embedding search",
+        "note": "semantic search via local multilingual embeddings, own collection separate from the reviews index",
     }
 
 

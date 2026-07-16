@@ -2,10 +2,11 @@
 
 Data reality notes (flagged explicitly per tool output, not hidden):
 
-1. Review text is Portuguese, untranslated. Real semantic search/RAG needs the Vector
-   Search layer (CLAUDE.md build order step 6, not built yet). search_reviews() here is
-   a literal keyword-match proxy, not embedding-based retrieval — it only works well if
-   the query itself is in Portuguese.
+1. search_reviews() does real semantic search via the local RAG layer (backend/rag/,
+   multilingual embeddings — see build order step 6). It queries in whatever language the
+   user writes in and still matches Portuguese review text, since the embedding model shares
+   one vector space across languages; no translation step needed. Requires the review index
+   to be built first — see notebooks/10_rag_index_build.ipynb.
 2. extract_common_complaints() does raw word-frequency on Portuguese text with basic
    stopword filtering, not real NLP entity/topic extraction (that's the NLP/DL layer,
    step 2, not built yet).
@@ -39,33 +40,22 @@ _PT_STOPWORDS = {
 }
 
 
-def _escape(s: str) -> str:
-    return s.replace("'", "''")[:200]
-
-
 def _tokenize(text: str) -> list[str]:
     words = re.findall(r"[a-zà-ú]+", text.lower())
     return [w for w in words if len(w) > 2 and w not in _PT_STOPWORDS]
 
 
-def search_reviews(db: DatabricksClient, query: str, limit: int = 10) -> dict:
-    """Keyword search over review text — a proxy for real semantic search (pending Vector Search)."""
-    safe_query = _escape(query)
-    sql = f"""
-        SELECT review_id, order_id, review_score, review_comment_title,
-               review_comment_message, review_creation_date
-        FROM {db.table('order_reviews')}
-        WHERE lower(review_comment_message) LIKE lower('%{safe_query}%')
-           OR lower(review_comment_title) LIKE lower('%{safe_query}%')
-        ORDER BY review_creation_date DESC
-        LIMIT {int(limit)}
-    """
-    rows = db.query(sql)
+def search_reviews(db: DatabricksClient, query: str, limit: int = 10, min_score: float = 0.35) -> dict:
+    """Semantic search over review text via the local multilingual RAG index."""
+    from backend.rag import get_review_index
+
+    index = get_review_index()
+    matches = index.search(query, top_k=limit, min_score=min_score)
     return {
         "query": query,
-        "matches": rows,
-        "match_count": len(rows),
-        "note": "literal keyword match on Portuguese text, not semantic/embedding search",
+        "matches": matches,
+        "match_count": len(matches),
+        "note": "semantic search via local multilingual embeddings (paraphrase-multilingual-MiniLM-L12-v2) - matches Portuguese review text regardless of the query's language",
     }
 
 

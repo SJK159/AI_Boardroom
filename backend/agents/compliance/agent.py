@@ -12,9 +12,9 @@ class ComplianceAgent(SpecialistAgent):
 
         search = self._call_tool("search_policy_docs", tools.search_policy_docs, db=self.db, query=query)
         findings.append(Finding(
-            claim=f"Keyword search for '{query}' matched {search['match_count']} document sections",
+            claim=f"Semantic search for '{query}' matched {search['match_count']} document sections above the relevance threshold",
             source="search_policy_docs",
-            confidence=0.4,
+            confidence=0.7,
             supporting_data=search,
             severity="info",
         ))

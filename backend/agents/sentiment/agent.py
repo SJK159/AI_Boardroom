@@ -12,9 +12,9 @@ class SentimentAgent(SpecialistAgent):
 
         search = self._call_tool("search_reviews", tools.search_reviews, db=self.db, query=query)
         findings.append(Finding(
-            claim=f"Keyword search for '{query}' matched {search['match_count']} reviews",
+            claim=f"Semantic search for '{query}' matched {search['match_count']} reviews above the relevance threshold",
             source="search_reviews",
-            confidence=0.4,
+            confidence=0.7,
             supporting_data=search,
             severity="info",
         ))

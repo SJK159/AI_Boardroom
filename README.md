@@ -127,7 +127,7 @@ Delta tables — `workspace.olist.*`:
 | `orders` | 99,441 | Finance, Sales, Operations, Risk |
 | `order_items` | ~112k | Finance, Sales, Growth |
 | `order_payments` | ~104k | Finance, Risk |
-| `order_reviews` | 99,249 | Sentiment (full search RAG pending — see 4.6) |
+| `order_reviews` | 99,249 | Sentiment — semantic search live, see section 4.12 |
 | `customers` | 99,441 | Sales, Growth, Risk |
 | `sellers` | ~3,100 | Operations, Risk, Compliance |
 | `products` | ~32,900 | Sales, Growth |
@@ -321,7 +321,7 @@ selection is a real decision and not a rubber stamp.
 
 | Tool | Computes | Data reality |
 |---|---|---|
-| `search_reviews` | Keyword match over review text | Proxy for real semantic search — Vector Search (build order step 6) isn't built yet, and this only works well with Portuguese-language queries |
+| `search_reviews` | Semantic search over review text via the local RAG layer | Real cross-lingual embedding search as of section 4.12 — an English query correctly retrieves Portuguese reviews, no translation step |
 | `sentiment_score_by_product` | Avg `review_score` (1-5) per product, top/bottom N | `review_score` is already a direct sentiment signal — no NLP needed |
 | `flag_negative_trend` | Monthly share of score <=2 reviews, trend direction | Computed directly |
 | `extract_common_complaints` | Word-frequency on negative review text | Raw Portuguese, basic stopword filtering only — real topic extraction needs the NLP/DL layer (step 2, not built) |
@@ -534,7 +534,7 @@ documents built specifically for this agent (per CLAUDE.md section 2, a wrapper 
 
 | Tool | Computes | Data reality |
 |---|---|---|
-| `search_policy_docs` | Keyword search across all 3 documents | Proxy for real semantic search — Vector Search with `doc_type` metadata tagging (a separate collection from reviews, per CLAUDE.md) is build-order step 6, not built yet |
+| `search_policy_docs` | Semantic search across all 3 documents via the local RAG layer | Real embedding search as of section 4.12, its own collection separate from reviews per CLAUDE.md, `doc_type` metadata-tagged |
 | `get_company_registration_info` | All registration fields | Direct structured lookup — exactly the "precision fact-retrieval, not pattern retrieval" CLAUDE.md calls for with these docs |
 | `check_contract_clause` | Looks up a clause by topic for a seller | All sellers share ONE standard template — no bespoke per-vendor contracts exist. `vendor` validates the seller_id and is accepted for interface consistency with a future state where addenda might exist |
 | `check_policy_compliance` | Looks up whether an HR topic is documented | Direct structured lookup |
@@ -577,6 +577,66 @@ data) picture of financial exposure — with accurate per-claim tool citations t
 
 Run it yourself: [`notebooks/09_compliance_agent_demo.ipynb`](notebooks/09_compliance_agent_demo.ipynb)
 
+### 4.12 RAG Layer — real semantic search, replacing both keyword-match proxies
+
+Build order step 6. Upgrades `search_reviews()` (Sentiment) and `search_policy_docs()`
+(Compliance) from SQL `LIKE`/keyword matching to real embedding-based semantic search.
+
+**Architecture decision: local embeddings, not Databricks Vector Search.** CLAUDE.md's stack
+table names Databricks Vector Search specifically — a separately billed managed compute
+endpoint on top of what's already running. Given the same cost-consciousness that drove the
+Groq decision for the boss agent, this uses **local, free embeddings** instead
+(`sentence-transformers`, CPU only, no GPU): same capability, zero additional infrastructure
+cost, swappable for real Databricks Vector Search later if this ever needs to scale past a
+single machine's memory. At this dataset's scale (~41k reviews with text, a handful of
+document sections) a single in-memory matrix multiply is fast enough — sub-millisecond query
+time, no approximate-nearest-neighbor index needed.
+
+**Multilingual embeddings, no translation step.** Olist reviews are mostly Portuguese
+(flagged back in section 2/3). Rather than translate-then-embed-with-an-English-model, this
+uses **`paraphrase-multilingual-MiniLM-L12-v2`**, which embeds Portuguese and English into the
+*same* vector space — a query typed in English still retrieves relevant Portuguese reviews
+correctly. Verified live:
+
+```
+English query: "product arrived broken"
+  [0.86] "O produto chegou quebrado"        (review_score=1)
+  [0.85] "O produto chegou quebrado."       (review_score=1)
+  [0.85] "O produto está quebrado"          (review_score=1)
+```
+
+No translation pipeline anywhere — one fewer moving part, one fewer place to introduce errors.
+
+**Two separate collections**, per CLAUDE.md section 2 — `backend/rag/review_index.py` and
+`backend/rag/policy_index.py`, each its own `VectorIndex` instance with a different metadata
+shape (`review_id`/`order_id`/`review_score` vs. `document`/`section`/`doc_type`), never
+mixed. Policy documents are chunked by section header — clause-addressable, reusing the
+Compliance agent's existing `document_loader.py` parser rather than fixed token windows,
+matching CLAUDE.md's chunking guidance for these docs specifically.
+
+**Build-once, load-fast.** Embedding ~41k reviews takes several minutes on CPU — too slow to
+redo on every query. `notebooks/10_rag_index_build.ipynb` builds both collections once and
+persists them to disk (`backend/rag/.cache/`, gitignored — regenerable derived data, same
+treatment as the raw CSVs); the agent tools then load the cached index and raise a clear error
+pointing back to that notebook if it hasn't been run yet, rather than silently attempting an
+expensive rebuild mid-query. The notebook is idempotent — re-running it detects the existing
+index and skips straight to verification.
+
+```
+backend/rag/
+├── embedder.py        Wraps the multilingual sentence-transformers model
+├── vector_index.py    Generic brute-force cosine-similarity index (build/search/save/load)
+├── review_index.py    Reviews collection — builds from order_reviews, loads/caches
+└── policy_index.py    Policy docs collection — builds from the 3 local documents, loads/caches
+```
+
+**Verified through the full stack**: both upgraded tools tested directly, then through their
+owning agents, then through the boss agent end-to-end — a query about damaged products now
+correctly retrieves real matching reviews (previously: zero matches unless phrased in exact
+Portuguese keywords) and feeds a properly-cited synthesis.
+
+Run it yourself: [`notebooks/10_rag_index_build.ipynb`](notebooks/10_rag_index_build.ipynb)
+
 ---
 
 ## 5. Tools & Stack
@@ -593,6 +653,7 @@ Run it yourself: [`notebooks/09_compliance_agent_demo.ipynb`](notebooks/09_compl
 | Agent orchestration | **LangGraph** | Boss agent's 3-node supervisor graph |
 | Boss LLM | **Groq (GPT OSS 20B) via `langchain-groq`** | Free tier — intent selection + synthesis. Chosen over Llama 3.3 70B for likely higher free-tier rate limits (smaller model) and strong structured-output reliability; swappable for a paid provider later behind the same interface |
 | Notebooks | **Jupyter + nbformat** | All runnable/demo scripts live as notebooks with markdown walkthroughs (`notebooks/`), not bare `.py` scripts — production code stays in `backend/` |
+| RAG / embeddings | **`sentence-transformers` (paraphrase-multilingual-MiniLM-L12-v2)**, local CPU | Chosen over Databricks Vector Search for the same cost reason Groq was chosen over a paid LLM API — same capability, zero additional infra cost, swappable later |
 | SLM (planned) | **Ollama + qwen2.5:7b-instruct** | Briefing compression layer — not built yet |
 | Frontend (planned) | **React (MERN) + Socket.io** | Not built yet |
 
@@ -626,10 +687,14 @@ GROQ_API_KEY=your_groq_key            # free at console.groq.com — needed for 
 ```bash
 pip install -r requirements.txt
 jupyter notebook notebooks/            # open and run in order:
-                                        #   01_data_ingestion.ipynb   (one-time: pull data + create Delta tables)
-                                        #   02_finance_agent_demo.ipynb
-                                        #   03_boss_agent_demo.ipynb
+                                        #   01_data_ingestion.ipynb    (one-time: pull data + create Delta tables)
+                                        #   10_rag_index_build.ipynb   (one-time: build the 2 vector indexes, ~5 min)
+                                        #   02-09_*_agent_demo.ipynb   (any order)
 ```
+
+`search_reviews()` and `search_policy_docs()` will raise a clear `RuntimeError` pointing back
+to `10_rag_index_build.ipynb` if run before that notebook has built the vector indexes at
+least once.
 
 **Why notebooks for the runnable/demo layer, `.py` for everything importable**: `backend/`
 holds code that other code imports — `FinanceAgent` is imported by `BossAgent`, which will
@@ -649,8 +714,8 @@ Per the build order in `CLAUDE.md`:
 3. ~~Finance Agent end-to-end, all 7 tools~~ ✅
 4. ~~Boss agent skeleton (LangGraph supervisor), wired to Finance Agent~~ ✅
 5. ~~Remaining specialist agents~~ ✅ — Sentiment, Sales, Operations, Growth, Risk, Compliance/HR all built. **All 7 specialists complete.**
-6. RAG layer (Databricks Vector Search) — real semantic search to replace the keyword-match proxies in `search_reviews()` (Sentiment) and `search_policy_docs()` (Compliance); institutional docs already built as part of Compliance ← next
-7. Governance logging middleware persistence + MongoDB
+6. ~~RAG layer~~ ✅ — real semantic search (local multilingual embeddings, see section 4.12) live in both `search_reviews()` (Sentiment) and `search_policy_docs()` (Compliance)
+7. **Governance logging middleware persistence + MongoDB** ← next
 8. MERN frontend + streaming + WebSocket agent status
 9. Eval suite
 10. Deployment containerization

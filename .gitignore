@@ -4,6 +4,9 @@
 # Raw data (large files — pulled via Kaggle on setup)
 data/raw/
 
+# RAG vector indexes (regenerated via notebooks/10_rag_index_build.ipynb)
+backend/rag/.cache/
+
 # Python
 __pycache__/
 **/__pycache__/

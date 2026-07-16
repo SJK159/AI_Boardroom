@@ -14,6 +14,9 @@ databricks-sql-connector>=3.0
 # Data tooling
 pandas>=2.0
 
+# RAG / embeddings
+sentence-transformers>=3.0
+
 # Env loading
 python-dotenv>=1.0
 
