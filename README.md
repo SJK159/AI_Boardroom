@@ -190,6 +190,9 @@ backend/
 │   ├── growth/           Fifth specialist agent, fully implemented
 │   │   ├── tools.py        7 tools — regional/category growth, acquisition, product-gap proxy
 │   │   └── agent.py        GrowthAgent — turns tool output into Finding objects
+│   ├── risk/             Sixth specialist agent, fully implemented
+│   │   ├── tools.py        7 tools — cancellations, disputes, churn, concentration, fraud signals
+│   │   └── agent.py        RiskAgent — turns tool output into Finding objects
 │   └── boss/            Orchestrator — no domain tools, LLM-driven
 │       ├── registry.py     AVAILABLE_SPECIALISTS — the one place that grows per new agent
 │       ├── llm_outputs.py  Structured-output shapes the boss LLM must return
@@ -469,6 +472,49 @@ the synthesis isn't manufacturing dissent just because it's primed to look for i
 
 Run it yourself: [`notebooks/07_growth_agent_demo.ipynb`](notebooks/07_growth_agent_demo.ipynb)
 
+### 4.10 Risk Agent — sixth specialist, a real statistics bug caught before it shipped
+
+| Tool | Computes | Data reality |
+|---|---|---|
+| `cancellation_trend` | Monthly cancellation rate + trend | Trailing-cutoff aware (reuses the Sales-agent fix) |
+| `flag_payment_disputes` | Canceled orders with payment already collected | Proxy — Olist has no explicit dispute/chargeback field |
+| `seller_churn_risk` | Sellers inactive for N+ months | Computed directly |
+| `concentration_risk` | Customer-side revenue concentration (HHI) | Deliberately distinct from Finance's `revenue_concentration` (seller-side) — same HHI methodology, different lens, not a duplicate |
+| `fraud_signal_detection` | Top-percentile payment-value outliers | **Switched from z-score to percentile mid-build** — see below |
+| `customer_churn_prediction` | Repeat customers overdue for their next order | Heuristic (own historical order gap), not a trained model. "Now" is the dataset's own analysis cutoff, not today's date — computing recency against the real current date would flag every customer as churned, since the data ends in 2018 |
+| `regulatory_exposure_check` | — | **Explicitly not available** — Olist's transactional data has zero legal/compliance signals (no consent records, no KYC/AML, no tax jurisdiction data). Real exposure checking depends on the Compliance/HR agent's institutional documents, not built yet |
+
+**A statistics methodology bug, caught by checking the numbers instead of trusting them.** The
+first version of `fraud_signal_detection()` used a z-score threshold (`z >= 3.0`) and flagged
+**1,724 of 99,440 orders (1.73%)**. Under a normal distribution, `z >= 3` should only catch
+about **0.13%** — the flagged rate was over 13x too high. The actual distribution explained why:
+
+| Stat | Value |
+|---|---|
+| Mean | R$160.99 |
+| Median | R$105.29 |
+| Skewness | ~9.15 (a normal distribution is 0) |
+| Max | R$13,664.08 |
+
+Per-order payment value is heavily right-skewed. Z-score assumes rough symmetry; on skewed
+data it systematically over-flags, because "3 standard deviations above the mean" isn't
+actually rare when the mean itself is dragged up by a long tail. Fixed by switching to a
+**percentile threshold** (top 0.5%), which makes no assumption about distribution shape —
+re-running against the same data flagged **498 orders**, almost exactly the expected 0.5% of
+99,440. This is the same instinct as the Sales trend bug and the Growth small-base-noise bug:
+a number that looks too clean or too extreme gets checked against the raw distribution before
+it ships, not after.
+
+**Four-agent synthesis, cleanly organized**: asking *"What should keep us up at night about
+this business?"* correctly invoked Risk, Finance, Operations, and Sentiment together. The
+resulting memo organized nine distinct risk areas (revenue anomalies, the COGS data gap,
+delivery performance, seller churn, payment disputes, regulatory visibility, customer
+concentration, product quality, and the carrier-data gap) with correct per-claim tool
+citations throughout — the synthesis holds together even as the number of simultaneous
+specialists grows.
+
+Run it yourself: [`notebooks/08_risk_agent_demo.ipynb`](notebooks/08_risk_agent_demo.ipynb)
+
 ---
 
 ## 5. Tools & Stack
@@ -540,7 +586,7 @@ Per the build order in `CLAUDE.md`:
 2. ~~Databricks connection + Olist data ingestion into Delta tables~~ ✅
 3. ~~Finance Agent end-to-end, all 7 tools~~ ✅
 4. ~~Boss agent skeleton (LangGraph supervisor), wired to Finance Agent~~ ✅
-5. Remaining specialist agents — Sentiment ✅, Sales ✅, Operations ✅, Growth ✅, **Risk, Compliance/HR remaining** ← next
+5. Remaining specialist agents — Sentiment ✅, Sales ✅, Operations ✅, Growth ✅, Risk ✅, **Compliance/HR remaining** ← next
 6. RAG layer (Vector Search) for Sentiment Agent + simulated institutional docs for Compliance
 7. Governance logging middleware persistence + MongoDB
 8. MERN frontend + streaming + WebSocket agent status

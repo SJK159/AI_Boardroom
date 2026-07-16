@@ -11,6 +11,7 @@ from backend.agents.base_agent import SpecialistAgent
 from backend.agents.finance import FinanceAgent
 from backend.agents.growth import GrowthAgent
 from backend.agents.operations import OperationsAgent
+from backend.agents.risk import RiskAgent
 from backend.agents.sales import SalesAgent
 from backend.agents.sentiment import SentimentAgent
 from backend.schemas import AgentType
@@ -29,6 +30,15 @@ AVAILABLE_SPECIALISTS: dict[AgentType, SpecialistEntry] = {
             "Margin and cost trends, revenue anomalies, payment failure/refund risk, "
             "cash-flow forecasting, and seller revenue concentration. Draws from orders, "
             "order_items, and order_payments."
+        ),
+    ),
+    AgentType.RISK: SpecialistEntry(
+        agent_class=RiskAgent,
+        description=(
+            "Cancellation trends, payment dispute risk, seller churn, customer revenue "
+            "concentration, statistical fraud-screening signals, customer churn risk, and "
+            "regulatory exposure (currently unavailable - no compliance data exists yet). "
+            "Draws from orders, order_payments, order_items, and customers."
         ),
     ),
     AgentType.SALES: SpecialistEntry(
