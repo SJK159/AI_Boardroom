@@ -207,6 +207,14 @@ backend/
 │       ├── prompts.py      Selection + synthesis prompt templates
 │       ├── state.py        BossState — shared state across the LangGraph graph
 │       └── graph.py        BossAgent — builds and runs the 3-node LangGraph graph
+├── rag/                 Shared layer (not agent-specific) — see section 4.12
+│   ├── embedder.py         Wraps the local multilingual sentence-transformers model
+│   ├── vector_index.py     Generic brute-force cosine-similarity index
+│   ├── review_index.py     Reviews collection
+│   └── policy_index.py     Policy docs collection
+└── governance/           Session-level audit logging — see section 4.13
+    ├── mongo_client.py     Thin wrapper — the ONLY file that talks to pymongo
+    └── logger.py           GovernanceLogger — wraps BossAgent, persists GovernanceLogs
 ```
 
 **Why schemas are split by file, not one giant `schemas.py`**: `Finding`/`ToolCallRecord` →
@@ -637,6 +645,59 @@ Portuguese keywords) and feeds a properly-cited synthesis.
 
 Run it yourself: [`notebooks/10_rag_index_build.ipynb`](notebooks/10_rag_index_build.ipynb)
 
+### 4.13 Governance Logging — session persistence, MongoDB Atlas
+
+Build order step 7. Every specialist agent already logs its own tool calls automatically
+(`SpecialistAgent._call_tool()` — per-*tool-call* traceability, live since the first agent was
+built). This adds the layer above it: one `GovernanceLog` per **session**, actually persisted,
+not just produced and discarded when `BossAgent.run()` returns.
+
+**Deliberately a wrapper around `BossAgent`, not a method on it.** `GovernanceLogger`
+(`backend/governance/logger.py`) takes a `BossAgent` instance and a `MongoClient` instance and
+composes them — `BossAgent` stays a pure function of `query -> BoardRecommendation`, the same
+separation of concerns as `DatabricksClient` being the only file that knows SQL.
+`backend/governance/mongo_client.py` is the only file that imports `pymongo` directly.
+
+**Storage: MongoDB Atlas's free M0 tier** — the same cost reasoning as Groq (boss LLM) and
+local embeddings (RAG layer): matches CLAUDE.md's stack (MongoDB/Mongoose for session storage)
+without a paid tier.
+
+**What gets logged**, mapped to CLAUDE.md section 6's governance pillars:
+
+| Field | Captures | Pillar |
+|---|---|---|
+| `session_id`, `user_query`, `recommendation` | Full session identity + the complete validated `BoardRecommendation` | Traceability |
+| `model_versions` | `{boss_llm, embedding_model}` | "Model/version logging per session for explainability across model swaps" |
+| `total_execution_time_ms` | Wall-clock session time | Operational visibility |
+| `human_decision`, `human_notes` | Set later via `record_human_decision()` | **Human Oversight** — closes the loop `requires_human_approval=True` opened but never enforced |
+
+**A real, previously-invisible bug found while building this.** Persisting a full session to
+MongoDB was the first time anything tried to *strictly* serialize a complete
+`BoardRecommendation` — and it failed immediately:
+
+```
+InvalidDocument: cannot encode object: <backend.db.databricks_client.DatabricksClient object>
+```
+
+Every tool call is logged via `SpecialistAgent._call_tool(tool_name, func, **kwargs)`
+(`backend/agents/base_agent.py`), which stored the *entire* `kwargs` dict as
+`ToolCallRecord.input_params` — and since every tool's signature starts with
+`db: DatabricksClient`, the **live database client object itself** had been embedded inside
+every `AgentBriefing` since the very first agent (Finance) was built. It never surfaced
+because nothing had tried to fully serialize it before — printing to console just shows a
+harmless-looking object repr, and it passed Pydantic validation fine since `input_params` is
+an untyped `dict` field Pydantic doesn't inspect deeply. MongoDB's BSON encoder was the first
+thing strict enough to catch it. Fixed by excluding `db` from what gets logged — it's an
+internal dependency every tool needs, not a meaningful audit-trail input.
+
+**Verified live**: session persisted, then independently re-fetched by ID from MongoDB (not
+just returned in-process) to confirm it's really in the database; a human decision
+(`accepted`, with notes) recorded and read back; `list_recent_sessions()` correctly shows
+multiple sessions with their review status; an audit-trail completeness check (the same shape
+build order step 9's eval suite will run) passes against real persisted data.
+
+Run it yourself: [`notebooks/11_governance_demo.ipynb`](notebooks/11_governance_demo.ipynb)
+
 ---
 
 ## 5. Tools & Stack
@@ -654,6 +715,7 @@ Run it yourself: [`notebooks/10_rag_index_build.ipynb`](notebooks/10_rag_index_b
 | Boss LLM | **Groq (GPT OSS 20B) via `langchain-groq`** | Free tier — intent selection + synthesis. Chosen over Llama 3.3 70B for likely higher free-tier rate limits (smaller model) and strong structured-output reliability; swappable for a paid provider later behind the same interface |
 | Notebooks | **Jupyter + nbformat** | All runnable/demo scripts live as notebooks with markdown walkthroughs (`notebooks/`), not bare `.py` scripts — production code stays in `backend/` |
 | RAG / embeddings | **`sentence-transformers` (paraphrase-multilingual-MiniLM-L12-v2)**, local CPU | Chosen over Databricks Vector Search for the same cost reason Groq was chosen over a paid LLM API — same capability, zero additional infra cost, swappable later |
+| Session storage | **MongoDB Atlas (M0 free tier) via `pymongo`** | Governance logs — same cost reasoning as Groq and local embeddings |
 | SLM (planned) | **Ollama + qwen2.5:7b-instruct** | Briefing compression layer — not built yet |
 | Frontend (planned) | **React (MERN) + Socket.io** | Not built yet |
 
@@ -667,8 +729,8 @@ Four pillars from the project spec, and what's actually implemented today:
 |---|---|
 | **Transparency** | Every `Finding` carries `confidence` + `severity`. Proxy-based tools (payment failure, refunds, margin) explicitly say so in their output rather than presenting estimates as facts. The synthesis LLM is explicitly prompted to record `Dissent`s rather than flatten disagreement into consensus — **demonstrated live** once Sentiment joined Finance: asked whether customer happiness is reflected in the numbers, the boss agent flagged Finance's improving margin against Sentiment's flat negative-review share and a 1.0/5-rated product as an explicit `Dissent`, not a smoothed-over summary. |
 | **Traceability** | Every `Finding.source` names the exact tool that produced it. Every tool call — args, output, timing, success/failure — is captured in `ToolCallRecord`, automatically, via the base class. |
-| **Human Oversight** | `BoardRecommendation.requires_human_approval` defaults to `True` (schema-level, not agent-level — can't be silently skipped). Now exercised end-to-end: every `BossAgent.run()` call produces a recommendation, never an auto-executed action. |
-| **Accountability** | `GovernanceLog` schema exists to capture full session audit trails (query, agents invoked, findings, model versions, human decision). Not yet wired into a persistence layer (MongoDB — planned, not built). |
+| **Human Oversight** | `BoardRecommendation.requires_human_approval` defaults to `True` (schema-level, not agent-level — can't be silently skipped). The full loop is now exercised end-to-end: a recommendation is produced, persisted, and `GovernanceLogger.record_human_decision()` records an actual accept/reject/modify verdict against it — not just a flag that's never acted on. |
+| **Accountability** | `GovernanceLog` captures full session audit trails (query, recommendation, model versions, execution time, human decision) and **persists them to MongoDB Atlas** — verified live via independent re-fetch by session ID, not just an in-memory object. See section 4.13. |
 
 ---
 
@@ -682,6 +744,7 @@ DATABRICKS_TOKEN=your_personal_access_token
 KAGGLE_USERNAME=your_kaggle_username
 KAGGLE_API_KEY=your_kaggle_key
 GROQ_API_KEY=your_groq_key            # free at console.groq.com — needed for the boss agent
+MONGODB_URI=your_atlas_connection_string  # free M0 tier at mongodb.com/cloud/atlas — needed for governance logging
 ```
 
 ```bash
@@ -690,6 +753,7 @@ jupyter notebook notebooks/            # open and run in order:
                                         #   01_data_ingestion.ipynb    (one-time: pull data + create Delta tables)
                                         #   10_rag_index_build.ipynb   (one-time: build the 2 vector indexes, ~5 min)
                                         #   02-09_*_agent_demo.ipynb   (any order)
+                                        #   11_governance_demo.ipynb  (session logging, any time after MongoDB is set up)
 ```
 
 `search_reviews()` and `search_policy_docs()` will raise a clear `RuntimeError` pointing back
@@ -715,8 +779,8 @@ Per the build order in `CLAUDE.md`:
 4. ~~Boss agent skeleton (LangGraph supervisor), wired to Finance Agent~~ ✅
 5. ~~Remaining specialist agents~~ ✅ — Sentiment, Sales, Operations, Growth, Risk, Compliance/HR all built. **All 7 specialists complete.**
 6. ~~RAG layer~~ ✅ — real semantic search (local multilingual embeddings, see section 4.12) live in both `search_reviews()` (Sentiment) and `search_policy_docs()` (Compliance)
-7. **Governance logging middleware persistence + MongoDB** ← next
-8. MERN frontend + streaming + WebSocket agent status
+7. ~~Governance logging middleware persistence + MongoDB~~ ✅ — see section 4.13
+8. **MERN frontend + streaming + WebSocket agent status** ← next
 9. Eval suite
 10. Deployment containerization
 

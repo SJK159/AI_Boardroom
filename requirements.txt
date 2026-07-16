@@ -17,6 +17,9 @@ pandas>=2.0
 # RAG / embeddings
 sentence-transformers>=3.0
 
+# Governance / session storage
+pymongo>=4.0
+
 # Env loading
 python-dotenv>=1.0
 

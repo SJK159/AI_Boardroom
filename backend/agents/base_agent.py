@@ -22,13 +22,17 @@ class SpecialistAgent(ABC):
         self._tool_calls: list[ToolCallRecord] = []
 
     def _call_tool(self, tool_name: str, func: Callable[..., Any], **kwargs) -> Any:
+        # db is an internal dependency every tool takes, not a meaningful "input" for the
+        # audit trail - and it isn't serializable (breaks MongoDB/JSON persistence of the
+        # governance log), so it's excluded from what gets logged.
+        loggable_params = {k: v for k, v in kwargs.items() if k != "db"}
         start = time.perf_counter()
         try:
             result = func(**kwargs)
             self._tool_calls.append(
                 ToolCallRecord(
                     tool_name=tool_name,
-                    input_params=kwargs,
+                    input_params=loggable_params,
                     output_summary=str(result)[:500],
                     execution_time_ms=(time.perf_counter() - start) * 1000,
                     success=True,
@@ -39,7 +43,7 @@ class SpecialistAgent(ABC):
             self._tool_calls.append(
                 ToolCallRecord(
                     tool_name=tool_name,
-                    input_params=kwargs,
+                    input_params=loggable_params,
                     output_summary="",
                     execution_time_ms=(time.perf_counter() - start) * 1000,
                     success=False,

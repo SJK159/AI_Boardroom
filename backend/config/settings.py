@@ -20,5 +20,8 @@ class Settings(BaseSettings):
     groq_api_key: str | None = None
     boss_llm_model: str = "openai/gpt-oss-20b"
 
+    mongodb_uri: str | None = None
+    mongodb_db_name: str = "ai_boardroom"
+
 
 settings = Settings()
