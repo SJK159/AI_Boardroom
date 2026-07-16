@@ -181,6 +181,9 @@ backend/
 │   ├── sentiment/        Second specialist agent, fully implemented
 │   │   ├── tools.py        7 tools — review sentiment, complaints, regional/photo correlation
 │   │   └── agent.py        SentimentAgent — turns tool output into Finding objects
+│   ├── sales/            Third specialist agent, fully implemented
+│   │   ├── tools.py        8 tools — revenue trend, AOV, category/seller ranking, cross-sell
+│   │   └── agent.py        SalesAgent — turns tool output into Finding objects
 │   └── boss/            Orchestrator — no domain tools, LLM-driven
 │       ├── registry.py     AVAILABLE_SPECIALISTS — the one place that grows per new agent
 │       ├── llm_outputs.py  Structured-output shapes the boss LLM must return
@@ -339,6 +342,46 @@ structured `Dissent`, not smoothed into false consensus.
 
 Run it yourself: [`notebooks/04_sentiment_agent_demo.ipynb`](notebooks/04_sentiment_agent_demo.ipynb)
 
+### 4.7 Sales Agent — third specialist
+
+| Tool | Computes | Data reality |
+|---|---|---|
+| `query_revenue_by_period` | Revenue + order count per day/week/month, trend direction | **Excludes trailing partial periods from the trend calc** — see the bug below |
+| `calculate_aov` | Overall + monthly average order value | Computed directly |
+| `sales_by_category` | Revenue and items sold per product category | Computed directly |
+| `seller_sales_ranking` | Top sellers by revenue/order volume | Volume lens only — deliberately overlaps with Operations' future `seller_performance_score` (reliability lens); CLAUDE.md calls this overlap intentional, not a bug |
+| `conversion_funnel_analysis` | Order status breakdown, drop-off rate | **Not a true top-of-funnel conversion** — Olist has no browse/cart data, so this proxies the *fulfillment* funnel (placed → delivered vs. canceled/unavailable), flagged as such |
+| `repeat_purchase_rate` | Share of customers with 2+ orders | Uses `customer_unique_id` (person-level), not `customer_id` — Olist issues a new `customer_id` per order, so using it here would silently read as ~0% repeat rate |
+| `seasonal_sales_pattern` | Revenue by calendar month, aggregated across years | Only 2016-2018 in the data — not enough years to cleanly separate seasonality from year-over-year growth |
+| `cross_sell_opportunities` | Category pairs frequently bought together | Simple co-occurrence within an order, not a trained recommendation model |
+
+**A second real data bug, caught the same way as the Sentiment one — by checking a suspicious
+number instead of trusting it.** The naive "last 12 months" window initially reported revenue
+as **declining**. The raw monthly order counts explain why:
+
+| Month | Orders |
+|---|---|
+| 2018-08 | 6,512 |
+| 2018-09 | 16 |
+| 2018-10 | 4 |
+
+Olist's data collection stops mid-way through September 2018 — the tail of the window is a
+collection cutoff, not a demand collapse. `query_revenue_by_period()` now detects trailing
+periods whose order count falls far below the window's median and excludes them from the trend
+calculation (while still returning them in the raw data via `excluded_partial_periods`), rather
+than reporting a false decline. This is exactly the class of error a single LLM summarizing raw
+numbers in one shot would likely miss silently — a concrete case for why tool-backed, code-
+verified findings matter over pure LLM reasoning over raw data, which is the whole premise this
+project is built on.
+
+**Known synthesis limitation, observed live**: with 3 specialists now registered, one board
+memo briefly misattributed `query_revenue_by_period` (a Sales-only tool) to Finance in its
+citation. Not a data pipeline bug — a citation slip from GPT OSS 20B during synthesis. Worth
+tracking as the roster grows; the Llama 3.3 70B / GPT OSS 120B upgrade path discussed earlier
+is the lever if citation accuracy needs to improve.
+
+Run it yourself: [`notebooks/05_sales_agent_demo.ipynb`](notebooks/05_sales_agent_demo.ipynb)
+
 ---
 
 ## 5. Tools & Stack
@@ -410,7 +453,7 @@ Per the build order in `CLAUDE.md`:
 2. ~~Databricks connection + Olist data ingestion into Delta tables~~ ✅
 3. ~~Finance Agent end-to-end, all 7 tools~~ ✅
 4. ~~Boss agent skeleton (LangGraph supervisor), wired to Finance Agent~~ ✅
-5. Remaining specialist agents — Sentiment done ✅, **Sales, Operations, Growth, Risk, Compliance/HR remaining** ← next
+5. Remaining specialist agents — Sentiment ✅, Sales ✅, **Operations, Growth, Risk, Compliance/HR remaining** ← next
 6. RAG layer (Vector Search) for Sentiment Agent + simulated institutional docs for Compliance
 7. Governance logging middleware persistence + MongoDB
 8. MERN frontend + streaming + WebSocket agent status
