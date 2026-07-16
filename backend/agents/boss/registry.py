@@ -9,6 +9,7 @@ from typing import Type
 
 from backend.agents.base_agent import SpecialistAgent
 from backend.agents.finance import FinanceAgent
+from backend.agents.sentiment import SentimentAgent
 from backend.schemas import AgentType
 
 
@@ -25,6 +26,14 @@ AVAILABLE_SPECIALISTS: dict[AgentType, SpecialistEntry] = {
             "Margin and cost trends, revenue anomalies, payment failure/refund risk, "
             "cash-flow forecasting, and seller revenue concentration. Draws from orders, "
             "order_items, and order_payments."
+        ),
+    ),
+    AgentType.SENTIMENT: SpecialistEntry(
+        agent_class=SentimentAgent,
+        description=(
+            "Customer review analysis: sentiment by product/region, negative review trends, "
+            "recurring complaint themes, and review-related correlations. Draws from "
+            "order_reviews, products, and customers. Review text is Portuguese and untranslated."
         ),
     ),
 }

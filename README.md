@@ -126,7 +126,7 @@ Delta tables — `workspace.olist.*`:
 | `orders` | 99,441 | Finance, Sales, Operations, Risk |
 | `order_items` | ~112k | Finance, Sales, Growth |
 | `order_payments` | ~104k | Finance, Risk |
-| `order_reviews` | ~99k | Sentiment (RAG, pending) |
+| `order_reviews` | 99,249 | Sentiment (full search RAG pending — see 4.6) |
 | `customers` | 99,441 | Sales, Growth, Risk |
 | `sellers` | ~3,100 | Operations, Risk, Compliance |
 | `products` | ~32,900 | Sales, Growth |
@@ -178,6 +178,9 @@ backend/
 │   ├── finance/         First specialist agent, fully implemented
 │   │   ├── tools.py        7 tools, pure functions, each returns raw computed data
 │   │   └── agent.py        FinanceAgent — turns tool output into Finding objects
+│   ├── sentiment/        Second specialist agent, fully implemented
+│   │   ├── tools.py        7 tools — review sentiment, complaints, regional/photo correlation
+│   │   └── agent.py        SentimentAgent — turns tool output into Finding objects
 │   └── boss/            Orchestrator — no domain tools, LLM-driven
 │       ├── registry.py     AVAILABLE_SPECIALISTS — the one place that grows per new agent
 │       ├── llm_outputs.py  Structured-output shapes the boss LLM must return
@@ -286,13 +289,55 @@ here — nothing else in the boss agent changes.
 the local SLM" for the boss agent, since it only runs once per session rather than once per
 tool call. That's still true with Groq — the point is a *hosted*, *capable* model separate from
 the lightweight local SLM layer, not necessarily the most expensive one. Groq's free tier
-serves Llama 3.3 70B fast enough for orchestration and synthesis, without burning money on
+serves GPT OSS 20B fast enough for orchestration and synthesis, without burning money on
 every test run during active development. This can be swapped for Anthropic/OpenAI later by
 changing one line in `graph.py` — nothing else depends on which provider `ChatGroq` becomes.
 
 Run it yourself: [`notebooks/03_boss_agent_demo.ipynb`](notebooks/03_boss_agent_demo.ipynb) —
 includes a second query deliberately outside Finance's domain, to demonstrate that agent
 selection is a real decision and not a rubber stamp.
+
+### 4.6 Sentiment Agent — second specialist, first real dissent
+
+| Tool | Computes | Data reality |
+|---|---|---|
+| `search_reviews` | Keyword match over review text | Proxy for real semantic search — Vector Search (build order step 6) isn't built yet, and this only works well with Portuguese-language queries |
+| `sentiment_score_by_product` | Avg `review_score` (1-5) per product, top/bottom N | `review_score` is already a direct sentiment signal — no NLP needed |
+| `flag_negative_trend` | Monthly share of score <=2 reviews, trend direction | Computed directly |
+| `extract_common_complaints` | Word-frequency on negative review text | Raw Portuguese, basic stopword filtering only — real topic extraction needs the NLP/DL layer (step 2, not built) |
+| `review_response_time_correlation` | Correlation between survey-answer latency and score | **Not seller response time** — `review_answer_timestamp` is when the *customer* answered Olist's satisfaction survey. No seller-response field exists in this dataset; the tool is named and flagged accordingly rather than implying something the data can't support |
+| `sentiment_by_region` | Avg score by customer state | Computed directly |
+| `photo_review_analysis` | Correlation between product *listing* photo count and score | Olist reviews have no photo attachments — uses `products.product_photos_qty` as the closest proxy |
+
+**A real data-quality bug found and fixed while building this agent**: ~0.07% of
+`order_reviews` rows (73 of 99,249) have review text containing both embedded newlines and
+doubled-quote escaping (`""word""`) together — an edge case Databricks' `multiLine` CSV reader
+doesn't fully resolve, which shifted text into the `review_creation_date` and even
+`review_score` columns for those rows. Two things were done about it:
+
+1. **Fixed at the source**: `notebooks/01_data_ingestion.ipynb` now reads `order_reviews` with
+   `multiLine => true`, which alone dropped a separate, larger issue — the *original* ingestion
+   (without `multiLine`) had inflated `order_reviews` to 104,162 rows by splitting reviews with
+   embedded newlines into multiple physical rows. The corrected count, 99,249, is much closer
+   to the dataset's documented ~99,224.
+2. **Defended in the tools**: every query touching `review_score` or the review dates uses
+   `try_cast(...)`, which returns `NULL` for the ~73 still-malformed rows instead of crashing —
+   `NULL` is automatically skipped by SQL aggregates (`AVG`, `SUM`) and `WHERE` filters, so no
+   separate `IS NOT NULL` bookkeeping was needed once `try_cast` was in place.
+
+**First demonstrated dissent** — with Finance and Sentiment both registered, asking *"Are
+customers happy, and is that reflected in the numbers?"* correctly invoked both agents in
+parallel, and the synthesis flagged a genuine conflict rather than picking a side:
+
+> Finance reports an improving contribution margin and low revenue concentration, yet
+> Sentiment indicates flat negative review share and a product with a 1.0/5 rating. The two
+> perspectives conflict on the implication that customer happiness is reflected in financial
+> performance.
+
+This is the mechanism CLAUDE.md's core design goal depends on — disagreement surfaced as a
+structured `Dissent`, not smoothed into false consensus.
+
+Run it yourself: [`notebooks/04_sentiment_agent_demo.ipynb`](notebooks/04_sentiment_agent_demo.ipynb)
 
 ---
 
@@ -308,7 +353,7 @@ selection is a real decision and not a rubber stamp.
 | Numerics | **NumPy** | z-score anomaly detection, linear regression for cash-flow forecast |
 | Language | **Python 3.14** | |
 | Agent orchestration | **LangGraph** | Boss agent's 3-node supervisor graph |
-| Boss LLM | **Groq (Llama 3.3 70B) via `langchain-groq`** | Free tier — intent selection + synthesis, swappable for a paid provider later behind the same interface |
+| Boss LLM | **Groq (GPT OSS 20B) via `langchain-groq`** | Free tier — intent selection + synthesis. Chosen over Llama 3.3 70B for likely higher free-tier rate limits (smaller model) and strong structured-output reliability; swappable for a paid provider later behind the same interface |
 | Notebooks | **Jupyter + nbformat** | All runnable/demo scripts live as notebooks with markdown walkthroughs (`notebooks/`), not bare `.py` scripts — production code stays in `backend/` |
 | SLM (planned) | **Ollama + qwen2.5:7b-instruct** | Briefing compression layer — not built yet |
 | Frontend (planned) | **React (MERN) + Socket.io** | Not built yet |
@@ -321,7 +366,7 @@ Four pillars from the project spec, and what's actually implemented today:
 
 | Pillar | Status |
 |---|---|
-| **Transparency** | Every `Finding` carries `confidence` + `severity`. Proxy-based tools (payment failure, refunds, margin) explicitly say so in their output rather than presenting estimates as facts. The synthesis LLM is explicitly prompted to record `Dissent`s rather than flatten disagreement into consensus — not yet demonstrable with only one specialist registered, but the mechanism is live. |
+| **Transparency** | Every `Finding` carries `confidence` + `severity`. Proxy-based tools (payment failure, refunds, margin) explicitly say so in their output rather than presenting estimates as facts. The synthesis LLM is explicitly prompted to record `Dissent`s rather than flatten disagreement into consensus — **demonstrated live** once Sentiment joined Finance: asked whether customer happiness is reflected in the numbers, the boss agent flagged Finance's improving margin against Sentiment's flat negative-review share and a 1.0/5-rated product as an explicit `Dissent`, not a smoothed-over summary. |
 | **Traceability** | Every `Finding.source` names the exact tool that produced it. Every tool call — args, output, timing, success/failure — is captured in `ToolCallRecord`, automatically, via the base class. |
 | **Human Oversight** | `BoardRecommendation.requires_human_approval` defaults to `True` (schema-level, not agent-level — can't be silently skipped). Now exercised end-to-end: every `BossAgent.run()` call produces a recommendation, never an auto-executed action. |
 | **Accountability** | `GovernanceLog` schema exists to capture full session audit trails (query, agents invoked, findings, model versions, human decision). Not yet wired into a persistence layer (MongoDB — planned, not built). |
@@ -365,7 +410,7 @@ Per the build order in `CLAUDE.md`:
 2. ~~Databricks connection + Olist data ingestion into Delta tables~~ ✅
 3. ~~Finance Agent end-to-end, all 7 tools~~ ✅
 4. ~~Boss agent skeleton (LangGraph supervisor), wired to Finance Agent~~ ✅
-5. **Remaining 6 specialist agents (Sales, Sentiment, Operations, Growth, Risk, Compliance/HR)** ← next
+5. Remaining specialist agents — Sentiment done ✅, **Sales, Operations, Growth, Risk, Compliance/HR remaining** ← next
 6. RAG layer (Vector Search) for Sentiment Agent + simulated institutional docs for Compliance
 7. Governance logging middleware persistence + MongoDB
 8. MERN frontend + streaming + WebSocket agent status
