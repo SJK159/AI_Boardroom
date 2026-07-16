@@ -1,0 +1,21 @@
+# Secrets
+.env
+
+# Raw data (large files — pulled via Kaggle on setup)
+data/raw/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+
+# Claude internal
+.claude/
