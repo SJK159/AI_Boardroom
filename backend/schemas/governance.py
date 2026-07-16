@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
@@ -13,4 +13,4 @@ class GovernanceLog(BaseModel):
     human_decision: Optional[Literal["accepted", "rejected", "modified"]] = None
     human_notes: Optional[str] = None
     total_execution_time_ms: Optional[float] = None
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

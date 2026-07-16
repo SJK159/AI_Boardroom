@@ -37,7 +37,10 @@ class BossAgent:
 
     def __init__(self, db: DatabricksClient):
         self.db = db
-        llm = ChatGroq(model=settings.boss_llm_model, api_key=settings.groq_api_key)
+        # temperature=0: a decision-support system should route/synthesize consistently for
+        # the same query - the eval suite caught the default (non-zero) temperature causing
+        # the same query to select different specialists across runs (see tests/test_synthesis_quality.py)
+        llm = ChatGroq(model=settings.boss_llm_model, api_key=settings.groq_api_key, temperature=0)
         self._selection_llm = llm.with_structured_output(AgentSelection)
         self._synthesis_llm = llm.with_structured_output(SynthesisOutput)
         self._graph = self._build_graph()

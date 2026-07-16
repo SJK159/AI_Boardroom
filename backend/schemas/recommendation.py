@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from pydantic import BaseModel, Field
 
@@ -22,4 +22,4 @@ class BoardRecommendation(BaseModel):
     confidence_overall: float = Field(ge=0, le=1)
     action_items: list[str] = Field(default_factory=list)
     requires_human_approval: bool = True  # governance: recommendation, not auto-action
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

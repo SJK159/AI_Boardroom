@@ -698,6 +698,52 @@ build order step 9's eval suite will run) passes against real persisted data.
 
 Run it yourself: [`notebooks/11_governance_demo.ipynb`](notebooks/11_governance_demo.ipynb)
 
+### 4.14 Eval Suite — regression tests, not one-off notebook checks
+
+Build order step 9. CLAUDE.md section 9: "not a single demo query — a regression eval suite,
+run on every prompt/model/schema change." A `pytest` suite (`tests/`) covering the five
+categories the spec defines, split into a fast tier (no live LLM calls — SQL/local-embedding
+checks only) and a slow tier (marked `llm`/`mongo` — exercises Groq and MongoDB Atlas):
+
+```bash
+pytest -m "not llm and not mongo"   # fast tier: ~40s, 15 tests
+pytest -m "llm or mongo"            # slow tier: ~4 min, 12 tests, costs Groq API calls
+pytest                               # everything: 27 tests
+```
+
+| Category (CLAUDE.md) | File | What it checks |
+|---|---|---|
+| Factual accuracy | `test_factual_accuracy.py` | Agent tool output vs. an **independently computed** ground truth (a different query than the tool's own, not a self-check) — includes regression tests for the trailing-period, small-base-noise, and percentile-threshold bugs found earlier in this build |
+| Retrieval relevance | `test_retrieval_relevance.py` | Precision@3 against a hand-labeled query/relevance set, for both the reviews and policy-docs RAG collections |
+| Synthesis quality | `test_synthesis_quality.py` | Dissent preservation (tested directly against the synthesis node, not dependent on live agent selection), no-fabricated-dissent, and a genuine **LLM-as-judge** rubric call |
+| Governance completeness | `test_governance_completeness.py` | Formalizes the manual checks from `notebooks/11_governance_demo.ipynb` — audit trail completeness, model-version capture, human-decision round-trip |
+| Robustness | `test_robustness.py` | Irrelevant queries, narrow single-domain queries, no-relevant-data queries, empty input — none should crash or over-invoke the roster |
+
+**Two real bugs the suite caught immediately, on its first run — not hypothetical value, actual
+value on day one:**
+
+1. **Non-deterministic specialist selection.** The dissent-preservation test initially called
+   the live boss agent and asserted a `Dissent` for a known-conflicting query — and failed,
+   because that run's *selection* step picked Sales + Sentiment instead of Finance +
+   Sentiment for the same query, and that pairing didn't read as conflicting. Root cause: the
+   boss LLM had no `temperature` set, so routing varied run-to-run — undesirable for a
+   decision-support system that should behave consistently. Fixed at the source
+   (`temperature=0` in `backend/agents/boss/graph.py`), and the test itself was redesigned to
+   verify the *synthesis* step's dissent-preservation logic directly (constructing known-
+   conflicting `AgentBriefing`s and calling `_synthesize()` in isolation), decoupling it from
+   selection-step variance entirely — selection behavior has its own coverage in
+   `test_robustness.py`.
+2. **An LLM-as-judge false failure from an incomplete evaluation input.** The judge test
+   initially passed only `rec.synthesis` (the free-text prose) to the judge model, which
+   correctly-but-uselessly flagged one run as "not actionable" because the prose happened to
+   end vaguely — while `rec.action_items`, a *separate structured field* that actually had
+   concrete items, was never shown to the judge at all. Fixed by judging the full
+   recommendation (synthesis + action items together), which is what a human reviewer would
+   actually see.
+
+Both fixes went in the same session the tests were written — the suite did its job before it
+even finished being built.
+
 ---
 
 ## 5. Tools & Stack
@@ -716,6 +762,7 @@ Run it yourself: [`notebooks/11_governance_demo.ipynb`](notebooks/11_governance_
 | Notebooks | **Jupyter + nbformat** | All runnable/demo scripts live as notebooks with markdown walkthroughs (`notebooks/`), not bare `.py` scripts — production code stays in `backend/` |
 | RAG / embeddings | **`sentence-transformers` (paraphrase-multilingual-MiniLM-L12-v2)**, local CPU | Chosen over Databricks Vector Search for the same cost reason Groq was chosen over a paid LLM API — same capability, zero additional infra cost, swappable later |
 | Session storage | **MongoDB Atlas (M0 free tier) via `pymongo`** | Governance logs — same cost reasoning as Groq and local embeddings |
+| Eval suite | **pytest** | Fast tier (SQL/local-embedding checks) + slow tier (`llm`/`mongo`-marked, live service calls) — see section 4.14 |
 | SLM (planned) | **Ollama + qwen2.5:7b-instruct** | Briefing compression layer — not built yet |
 | Frontend (planned) | **React (MERN) + Socket.io** | Not built yet |
 
@@ -760,6 +807,13 @@ jupyter notebook notebooks/            # open and run in order:
 to `10_rag_index_build.ipynb` if run before that notebook has built the vector indexes at
 least once.
 
+Run the eval suite (after the two ingestion/index notebooks have been run at least once):
+
+```bash
+pytest -m "not llm and not mongo"   # fast tier, ~40s
+pytest                               # everything, ~4-5 min total, costs Groq API calls
+```
+
 **Why notebooks for the runnable/demo layer, `.py` for everything importable**: `backend/`
 holds code that other code imports — `FinanceAgent` is imported by `BossAgent`, which will
 later be imported by a FastAPI route. That has to stay as clean, diffable, importable modules.
@@ -781,7 +835,7 @@ Per the build order in `CLAUDE.md`:
 6. ~~RAG layer~~ ✅ — real semantic search (local multilingual embeddings, see section 4.12) live in both `search_reviews()` (Sentiment) and `search_policy_docs()` (Compliance)
 7. ~~Governance logging middleware persistence + MongoDB~~ ✅ — see section 4.13
 8. **MERN frontend + streaming + WebSocket agent status** ← next
-9. Eval suite
+9. ~~Eval suite~~ ✅ — see section 4.14 (built ahead of step 8, at the user's direction)
 10. Deployment containerization
 
 Full project spec, including all 7 agents' complete tool lists and the schema reference, lives

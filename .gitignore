@@ -24,5 +24,8 @@ build/
 # Jupyter
 .ipynb_checkpoints/
 
+# pytest
+.pytest_cache/
+
 # Claude internal
 .claude/
