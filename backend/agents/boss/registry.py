@@ -9,6 +9,7 @@ from typing import Type
 
 from backend.agents.base_agent import SpecialistAgent
 from backend.agents.finance import FinanceAgent
+from backend.agents.operations import OperationsAgent
 from backend.agents.sales import SalesAgent
 from backend.agents.sentiment import SentimentAgent
 from backend.schemas import AgentType
@@ -36,6 +37,15 @@ AVAILABLE_SPECIALISTS: dict[AgentType, SpecialistEntry] = {
             "order fulfillment funnel drop-off, repeat purchase rate, seasonal patterns, "
             "and cross-sell category pairs. Draws from orders, order_items, customers, "
             "and products."
+        ),
+    ),
+    AgentType.OPERATIONS: SpecialistEntry(
+        agent_class=OperationsAgent,
+        description=(
+            "Delivery delay and lateness rates, seller reliability (on-time delivery, not "
+            "revenue), shipping cost efficiency, fulfillment stage bottlenecks, and delivery "
+            "estimate accuracy. Draws from orders, order_items, sellers, and customers. No "
+            "carrier-level data exists in the source."
         ),
     ),
     AgentType.SENTIMENT: SpecialistEntry(

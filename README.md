@@ -184,6 +184,9 @@ backend/
 │   ├── sales/            Third specialist agent, fully implemented
 │   │   ├── tools.py        8 tools — revenue trend, AOV, category/seller ranking, cross-sell
 │   │   └── agent.py        SalesAgent — turns tool output into Finding objects
+│   ├── operations/       Fourth specialist agent, fully implemented
+│   │   ├── tools.py        7 tools — delivery delay, seller reliability, fulfillment bottlenecks
+│   │   └── agent.py        OperationsAgent — turns tool output into Finding objects
 │   └── boss/            Orchestrator — no domain tools, LLM-driven
 │       ├── registry.py     AVAILABLE_SPECIALISTS — the one place that grows per new agent
 │       ├── llm_outputs.py  Structured-output shapes the boss LLM must return
@@ -382,6 +385,32 @@ is the lever if citation accuracy needs to improve.
 
 Run it yourself: [`notebooks/05_sales_agent_demo.ipynb`](notebooks/05_sales_agent_demo.ipynb)
 
+### 4.8 Operations/Logistics Agent — fourth specialist, second demonstrated dissent
+
+| Tool | Computes | Data reality |
+|---|---|---|
+| `calculate_delivery_delay` | Avg delay + late-delivery rate vs. Olist's own delivery estimate | Computed directly |
+| `seller_performance_score` | Seller reliability: on-time %, avg delay | Reliability lens only — deliberately overlaps with Sales' `seller_sales_ranking` (revenue/volume), a different lens on the same sellers, per CLAUDE.md |
+| `flag_late_shipments` | Mild vs. severe lateness buckets | Computed directly |
+| `shipping_cost_analysis` | Freight cost, interstate vs. intrastate | Logistics-efficiency framing — deliberately distinct from Finance's margin-impact framing of the same `freight_value` field |
+| `carrier_performance_comparison` | — | **Explicitly returns "not available"** — Olist's schema has no carrier/shipping-company identifier anywhere, so there's nothing to compare across carriers. Third tool across the roster (after Finance's `calculate_cogs`) to hit a hard data wall and say so rather than approximate something misleading |
+| `fulfillment_bottleneck_detection` | Avg duration of each fulfillment stage | Uses fractional-day precision, not whole-day `datediff`, so same-day stages like approval still show meaningful averages instead of rounding to zero |
+| `estimated_vs_actual_delivery_accuracy` | MAE + bias of Olist's own delivery estimate | Bias sign is a real signal, not just an error metric: -11.88 days observed live means Olist's estimate is conservative and deliveries tend to arrive early (under-promise, over-deliver) |
+
+**Second demonstrated dissent** — with Operations and Sentiment both registered, asking
+*"Are delivery problems hurting customer satisfaction?"* correctly invoked both, and again the
+synthesis surfaced a real conflict instead of picking a side:
+
+> Operations reports 8.11% late deliveries and 9.33-day transit times, yet Sentiment finds a
+> flat negative review share over the last 12 months and no explicit mentions of delivery
+> problems in reviews. The two findings conflict regarding the impact of delivery performance
+> on customer satisfaction.
+
+Two dissents now demonstrated across two independent specialist pairings (Finance/Sentiment,
+Operations/Sentiment) — the mechanism isn't a one-off, it holds as the roster grows.
+
+Run it yourself: [`notebooks/06_operations_agent_demo.ipynb`](notebooks/06_operations_agent_demo.ipynb)
+
 ---
 
 ## 5. Tools & Stack
@@ -453,7 +482,7 @@ Per the build order in `CLAUDE.md`:
 2. ~~Databricks connection + Olist data ingestion into Delta tables~~ ✅
 3. ~~Finance Agent end-to-end, all 7 tools~~ ✅
 4. ~~Boss agent skeleton (LangGraph supervisor), wired to Finance Agent~~ ✅
-5. Remaining specialist agents — Sentiment ✅, Sales ✅, **Operations, Growth, Risk, Compliance/HR remaining** ← next
+5. Remaining specialist agents — Sentiment ✅, Sales ✅, Operations ✅, **Growth, Risk, Compliance/HR remaining** ← next
 6. RAG layer (Vector Search) for Sentiment Agent + simulated institutional docs for Compliance
 7. Governance logging middleware persistence + MongoDB
 8. MERN frontend + streaming + WebSocket agent status
