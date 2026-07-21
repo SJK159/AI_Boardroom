@@ -103,7 +103,7 @@ def flag_negative_trend(db: DatabricksClient, months: int = 12) -> dict:
     rows = db.query(sql)
     rows.sort(key=lambda r: r["month"])
     for r in rows:
-        r["negative_pct"] = round(int(r["negative_reviews"]) / int(r["total_reviews"]) * 100, 2) if r["total_reviews"] else 0.0
+        r["negative_pct"] = round(int(r["negative_reviews"]) / int(r["total_reviews"]) * 100, 2) if int(r["total_reviews"]) else 0.0
 
     trend_direction = "flat"
     if len(rows) >= 2:
@@ -149,9 +149,16 @@ def review_response_time_correlation(db: DatabricksClient) -> dict:
           AND try_cast(review_score AS INT) IS NOT NULL
     """
     rows = db.query(sql)
-    scores = np.array([float(r["review_score"]) for r in rows])
-    hours = np.array([float(r["response_hours"]) for r in rows if r["response_hours"] is not None])
-    scores = scores[: len(hours)]
+    # Filter scores/hours together by the SAME row (not by truncating scores to len(hours)) -
+    # a null response_hours can occur anywhere in the result set, not just at the end, and a
+    # length-only truncation would silently misalign every score/hours pair after the first gap.
+    paired = [
+        (float(r["review_score"]), float(r["response_hours"]))
+        for r in rows
+        if r["response_hours"] is not None
+    ]
+    scores = np.array([p[0] for p in paired])
+    hours = np.array([p[1] for p in paired])
 
     valid = hours >= 0
     scores, hours = scores[valid], hours[valid]

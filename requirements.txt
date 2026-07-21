@@ -19,6 +19,7 @@ sentence-transformers>=3.0
 
 # Governance / session storage
 pymongo>=4.0
+certifi>=2024.0
 
 # Env loading
 python-dotenv>=1.0

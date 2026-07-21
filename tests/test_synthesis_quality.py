@@ -10,6 +10,7 @@ from langchain_groq import ChatGroq
 from pydantic import BaseModel, Field
 
 from backend.config import settings
+from backend.llm_utils import invoke_with_retry
 from backend.schemas import AgentBriefing, AgentType, Finding
 
 pytestmark = pytest.mark.llm
@@ -89,7 +90,12 @@ def test_llm_judge_rates_synthesis_quality(boss):
     solely dependent on how the free-text synthesis happens to end. An earlier version of this
     test judged synthesis text alone and failed on a run where the prose ended vaguely even
     though structured action_items were present and concrete - a false failure caused by an
-    incomplete evaluation input, not a real quality problem."""
+    incomplete evaluation input, not a real quality problem.
+
+    Uses invoke_with_retry (the same helper BossAgent's own structured-output calls use) since
+    this is the identical ChatGroq + with_structured_output pattern exposed to the same known
+    Groq/GPT-OSS-20B flakiness - without it, this test could fail nondeterministically on
+    infrastructure flakiness that looks like a synthesis-quality regression."""
     rec = boss.run("How is our financial health looking?")
 
     judge_llm = ChatGroq(model=settings.boss_llm_model, api_key=settings.groq_api_key).with_structured_output(
@@ -97,7 +103,7 @@ def test_llm_judge_rates_synthesis_quality(boss):
     )
     action_items_text = "\n".join(f"- {item}" for item in rec.action_items) or "(none)"
     judge_input = f"Synthesis:\n\n{rec.synthesis}\n\nAction items:\n{action_items_text}"
-    rubric: SynthesisQualityRubric = judge_llm.invoke([
+    rubric: SynthesisQualityRubric = invoke_with_retry(judge_llm, [
         SystemMessage(content=_JUDGE_SYSTEM_PROMPT),
         HumanMessage(content=judge_input),
     ])

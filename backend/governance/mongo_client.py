@@ -5,6 +5,7 @@ pymongo itself, so swapping the storage backend later touches exactly this file.
 """
 from typing import Any
 
+import certifi
 from pymongo import MongoClient as _PyMongoClient
 from pymongo.collection import Collection
 
@@ -13,7 +14,10 @@ from backend.config import settings
 
 class MongoClient:
     def __init__(self):
-        self._client = _PyMongoClient(settings.mongodb_uri)
+        # tlsCAFile is pinned to certifi's bundle rather than relying on the OS trust store -
+        # on Windows, pymongo's default TLS context fails the Atlas handshake with
+        # TLSV1_ALERT_INTERNAL_ERROR under some Python/OpenSSL combinations otherwise.
+        self._client = _PyMongoClient(settings.mongodb_uri, tlsCAFile=certifi.where())
         self._db = self._client[settings.mongodb_db_name]
 
     @property

@@ -155,8 +155,8 @@ def refund_impact_analysis(db: DatabricksClient) -> dict:
         JOIN {db.table('order_payments')} p ON o.order_id = p.order_id
     """
     row = db.query(sql)[0]
-    total = float(row["total_value"]) or 1.0
-    at_risk = float(row["at_risk_value"]) or 0.0
+    total = float(row["total_value"] or 1.0)
+    at_risk = float(row["at_risk_value"] or 0.0)
 
     return {
         "at_risk_value": round(at_risk, 2),

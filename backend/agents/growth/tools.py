@@ -4,8 +4,9 @@ Data reality notes (flagged explicitly per tool output, not hidden):
 
 1. Olist's order data collection trails off mid-2018 (see Sales agent's finding of the same
    issue: Sept 2018 has 16 orders, Oct has 4, vs. thousands per month before that). Every
-   trend/growth tool here computes an analysis cutoff (_get_analysis_cutoff) and excludes
-   anything after it, rather than letting a collection artifact read as market collapse.
+   trend/growth tool here calls backend.agents.common.get_analysis_cutoff() (shared with Sales
+   and Risk) and excludes anything after it, rather than letting a collection artifact read as
+   market collapse.
 2. product_gap_analysis() is explicitly the weakest-fit tool for this dataset, per CLAUDE.md:
    Olist only records products actually SOLD on the platform - there is no external market
    data, no competitor catalog, no visibility into demand for products never listed at all.
@@ -13,34 +14,11 @@ Data reality notes (flagged explicitly per tool output, not hidden):
    (revenue-per-seller as a signal of under- vs over-supplied categories), not true
    whitespace/product-gap analysis. Flagged accordingly rather than overclaiming.
 """
+from backend.agents.common import get_analysis_cutoff
 from backend.db import DatabricksClient
 
 NON_REVENUE_STATUSES = ("'canceled'", "'unavailable'")
 _EXCLUDE_CLAUSE = f"o.order_status NOT IN ({', '.join(NON_REVENUE_STATUSES)})"
-
-
-def _get_analysis_cutoff(db: DatabricksClient) -> str:
-    """Timestamp literal marking the end of the last COMPLETE month in the data.
-
-    Detects trailing months whose order count is far below the dataset's median (a
-    collection cutoff, not a real drop-off) and excludes them - same heuristic as
-    Sales' query_revenue_by_period, applied once here as the shared basis for every
-    growth/trend tool.
-    """
-    sql = f"""
-        SELECT date_trunc('month', order_purchase_timestamp) AS month, COUNT(*) AS n
-        FROM {db.table('orders')}
-        GROUP BY 1 ORDER BY 1
-    """
-    rows = db.query(sql)
-    counts = sorted(int(r["n"]) for r in rows)
-    median_count = counts[len(counts) // 2] if counts else 0
-    complete = list(rows)
-    while complete and median_count and int(complete[-1]["n"]) < median_count * 0.5:
-        complete.pop()
-    if not complete:
-        return "9999-01-01"
-    return str(complete[-1]["month"])
 
 
 def regional_sales_breakdown(db: DatabricksClient, top_n: int = 10) -> dict:
@@ -94,7 +72,7 @@ def market_expansion_signals(db: DatabricksClient, top_n: int = 5, min_prior_rev
     Filters out states below min_prior_revenue before ranking: a tiny baseline (e.g. R$650)
     can produce an 800%+ "growth" number that's really just noise, not a real signal.
     """
-    cutoff = _get_analysis_cutoff(db)
+    cutoff = get_analysis_cutoff(db)
     joins = f"JOIN {db.table('customers')} c ON o.customer_id = c.customer_id"
     recent, prior = _period_revenue_by_dimension(db, "c.customer_state", "state", joins, cutoff)
 
@@ -125,7 +103,7 @@ def category_growth_rate(db: DatabricksClient, top_n: int = 10, min_prior_revenu
     guard as market_expansion_signals (e.g. R$80 -> R$3,953 reads as 4849% "growth" but is
     really a near-empty category, not a real trend).
     """
-    cutoff = _get_analysis_cutoff(db)
+    cutoff = get_analysis_cutoff(db)
     joins = f"""
         JOIN {db.table('products')} p ON oi.product_id = p.product_id
         LEFT JOIN {db.table('product_category_translation')} t ON p.product_category_name = t.product_category_name
@@ -156,7 +134,7 @@ def category_growth_rate(db: DatabricksClient, top_n: int = 10, min_prior_revenu
 
 def customer_acquisition_trend(db: DatabricksClient, months: int = 12) -> dict:
     """New customers (by first order date, person-level via customer_unique_id) per month."""
-    cutoff = _get_analysis_cutoff(db)
+    cutoff = get_analysis_cutoff(db)
     sql = f"""
         SELECT date_trunc('month', first_order) AS month, COUNT(*) AS new_customers
         FROM (
@@ -189,7 +167,7 @@ def underperforming_region_diagnosis(db: DatabricksClient, bottom_n: int = 5, mi
     Same small-base-noise guard as market_expansion_signals: a state dropping from R$600 to
     R$50 reads as -92% but isn't a meaningful business signal at that volume.
     """
-    cutoff = _get_analysis_cutoff(db)
+    cutoff = get_analysis_cutoff(db)
     joins = f"JOIN {db.table('customers')} c ON o.customer_id = c.customer_id"
     recent, prior = _period_revenue_by_dimension(db, "c.customer_state", "state", joins, cutoff)
 
@@ -214,7 +192,7 @@ def underperforming_region_diagnosis(db: DatabricksClient, bottom_n: int = 5, mi
 
 def new_seller_onboarding_rate(db: DatabricksClient, months: int = 12) -> dict:
     """New sellers (by first order date) per month."""
-    cutoff = _get_analysis_cutoff(db)
+    cutoff = get_analysis_cutoff(db)
     sql = f"""
         SELECT date_trunc('month', first_order) AS month, COUNT(*) AS new_sellers
         FROM (

@@ -8,9 +8,25 @@ class SentimentAgent(SpecialistAgent):
     agent_type = AgentType.SENTIMENT
 
     def analyze(self, query: str) -> list[Finding]:
+        results = self._call_tools_parallel({
+            "search_reviews": (tools.search_reviews, {"db": self.db, "query": query}),
+            "sentiment_score_by_product": (tools.sentiment_score_by_product, {"db": self.db}),
+            "flag_negative_trend": (tools.flag_negative_trend, {"db": self.db}),
+            "extract_common_complaints": (tools.extract_common_complaints, {"db": self.db}),
+            "review_response_time_correlation": (tools.review_response_time_correlation, {"db": self.db}),
+            "sentiment_by_region": (tools.sentiment_by_region, {"db": self.db}),
+            "photo_review_analysis": (tools.photo_review_analysis, {"db": self.db}),
+        })
+        search = results["search_reviews"]
+        by_product = results["sentiment_score_by_product"]
+        negative_trend = results["flag_negative_trend"]
+        complaints = results["extract_common_complaints"]
+        response_corr = results["review_response_time_correlation"]
+        by_region = results["sentiment_by_region"]
+        photo_analysis = results["photo_review_analysis"]
+
         findings = []
 
-        search = self._call_tool("search_reviews", tools.search_reviews, db=self.db, query=query)
         findings.append(Finding(
             claim=f"Semantic search for '{query}' matched {search['match_count']} reviews above the relevance threshold",
             source="search_reviews",
@@ -19,7 +35,6 @@ class SentimentAgent(SpecialistAgent):
             severity="info",
         ))
 
-        by_product = self._call_tool("sentiment_score_by_product", tools.sentiment_score_by_product, db=self.db)
         worst = by_product["bottom_products"][0] if by_product["bottom_products"] else None
         findings.append(Finding(
             claim=f"Lowest-rated product (min {by_product['min_reviews_threshold']} reviews) is {worst['product_id']} at {worst['avg_score']}/5 ({worst['review_count']} reviews)" if worst else "No products meet the minimum review threshold",
@@ -29,7 +44,6 @@ class SentimentAgent(SpecialistAgent):
             severity="warning" if worst and float(worst["avg_score"]) < 2.5 else "info",
         ))
 
-        negative_trend = self._call_tool("flag_negative_trend", tools.flag_negative_trend, db=self.db)
         findings.append(Finding(
             claim=f"Negative review share (score <=2) is {negative_trend['trend_direction']} across the last {len(negative_trend['monthly'])} months",
             source="flag_negative_trend",
@@ -38,7 +52,6 @@ class SentimentAgent(SpecialistAgent):
             severity="warning" if negative_trend["trend_direction"] == "worsening" else "info",
         ))
 
-        complaints = self._call_tool("extract_common_complaints", tools.extract_common_complaints, db=self.db)
         top_terms = ", ".join(t["term"] for t in complaints["top_terms"][:5])
         findings.append(Finding(
             claim=f"Top recurring terms in negative reviews (Portuguese, {complaints['reviews_analyzed']} reviews): {top_terms}" if complaints["top_terms"] else "No negative review text available to analyze",
@@ -48,7 +61,6 @@ class SentimentAgent(SpecialistAgent):
             severity="info",
         ))
 
-        response_corr = self._call_tool("review_response_time_correlation", tools.review_response_time_correlation, db=self.db)
         findings.append(Finding(
             claim=f"Survey-answer latency vs. review score correlation is {response_corr['correlation']} across {response_corr['reviews_analyzed']} reviews",
             source="review_response_time_correlation",
@@ -57,7 +69,6 @@ class SentimentAgent(SpecialistAgent):
             severity="info",
         ))
 
-        by_region = self._call_tool("sentiment_by_region", tools.sentiment_by_region, db=self.db)
         best, worst_r = by_region["best_state"], by_region["worst_state"]
         findings.append(Finding(
             claim=f"Sentiment ranges from {best['avg_score']}/5 in {best['state']} to {worst_r['avg_score']}/5 in {worst_r['state']}" if best and worst_r else "Insufficient regional data",
@@ -67,7 +78,6 @@ class SentimentAgent(SpecialistAgent):
             severity="info",
         ))
 
-        photo_analysis = self._call_tool("photo_review_analysis", tools.photo_review_analysis, db=self.db)
         findings.append(Finding(
             claim=f"Product listing photo count vs. review score correlation is {photo_analysis['correlation']} across {photo_analysis['reviews_analyzed']} reviews",
             source="photo_review_analysis",

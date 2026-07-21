@@ -8,9 +8,25 @@ class FinanceAgent(SpecialistAgent):
     agent_type = AgentType.FINANCE
 
     def analyze(self, query: str) -> list[Finding]:
+        results = self._call_tools_parallel({
+            "calculate_margin_trend": (tools.calculate_margin_trend, {"db": self.db}),
+            "detect_revenue_anomalies": (tools.detect_revenue_anomalies, {"db": self.db}),
+            "payment_failure_rate": (tools.payment_failure_rate, {"db": self.db}),
+            "calculate_cogs": (tools.calculate_cogs, {"db": self.db}),
+            "cash_flow_forecast": (tools.cash_flow_forecast, {"db": self.db}),
+            "refund_impact_analysis": (tools.refund_impact_analysis, {"db": self.db}),
+            "revenue_concentration": (tools.revenue_concentration, {"db": self.db}),
+        })
+        margin = results["calculate_margin_trend"]
+        anomalies = results["detect_revenue_anomalies"]
+        failure = results["payment_failure_rate"]
+        cogs = results["calculate_cogs"]
+        forecast = results["cash_flow_forecast"]
+        refunds = results["refund_impact_analysis"]
+        concentration = results["revenue_concentration"]
+
         findings = []
 
-        margin = self._call_tool("calculate_margin_trend", tools.calculate_margin_trend, db=self.db)
         findings.append(Finding(
             claim=f"Contribution margin is {margin['trend_direction']} across the last {len(margin['monthly'])} months",
             source="calculate_margin_trend",
@@ -19,7 +35,6 @@ class FinanceAgent(SpecialistAgent):
             severity="warning" if margin["trend_direction"] == "declining" else "info",
         ))
 
-        anomalies = self._call_tool("detect_revenue_anomalies", tools.detect_revenue_anomalies, db=self.db)
         findings.append(Finding(
             claim=f"{len(anomalies['anomalies'])} daily revenue anomalies detected out of {anomalies['days_analyzed']} days analyzed",
             source="detect_revenue_anomalies",
@@ -28,7 +43,6 @@ class FinanceAgent(SpecialistAgent):
             severity="warning" if anomalies["anomalies"] else "info",
         ))
 
-        failure = self._call_tool("payment_failure_rate", tools.payment_failure_rate, db=self.db)
         findings.append(Finding(
             claim=f"Order failure rate (canceled/unavailable proxy) is {failure['failure_rate_pct']}% of {failure['total_orders']} orders",
             source="payment_failure_rate",
@@ -37,7 +51,6 @@ class FinanceAgent(SpecialistAgent):
             severity="warning" if failure["failure_rate_pct"] > 5 else "info",
         ))
 
-        cogs = self._call_tool("calculate_cogs", tools.calculate_cogs, db=self.db)
         findings.append(Finding(
             claim="COGS cannot be calculated - source data has no unit cost field",
             source="calculate_cogs",
@@ -46,7 +59,6 @@ class FinanceAgent(SpecialistAgent):
             severity="warning",
         ))
 
-        forecast = self._call_tool("cash_flow_forecast", tools.cash_flow_forecast, db=self.db)
         next_period = forecast["forecast"][0]["projected_cash_in"] if forecast["forecast"] else None
         findings.append(Finding(
             claim=f"Next month's projected cash-in is {next_period}" if next_period is not None else "Insufficient history for a cash-flow forecast",
@@ -56,7 +68,6 @@ class FinanceAgent(SpecialistAgent):
             severity="info",
         ))
 
-        refunds = self._call_tool("refund_impact_analysis", tools.refund_impact_analysis, db=self.db)
         findings.append(Finding(
             claim=f"{refunds['impact_pct']}% of total payment value ({refunds['at_risk_value']}) is at risk from canceled/unavailable orders",
             source="refund_impact_analysis",
@@ -65,7 +76,6 @@ class FinanceAgent(SpecialistAgent):
             severity="warning" if refunds["impact_pct"] > 3 else "info",
         ))
 
-        concentration = self._call_tool("revenue_concentration", tools.revenue_concentration, db=self.db)
         findings.append(Finding(
             claim=f"Revenue concentration is {concentration['concentration_level']} - top {concentration['top_n']} sellers hold {concentration['top_n_revenue_share_pct']}% of revenue (HHI {concentration['hhi']})",
             source="revenue_concentration",

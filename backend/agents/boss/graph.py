@@ -1,4 +1,3 @@
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -7,6 +6,7 @@ from langgraph.graph import END, StateGraph
 
 from backend.config import settings
 from backend.db import DatabricksClient
+from backend.llm_utils import invoke_with_retry
 from backend.schemas import AgentBriefing, BoardRecommendation
 
 from .llm_outputs import AgentSelection, SynthesisOutput
@@ -45,30 +45,10 @@ class BossAgent:
         self._synthesis_llm = llm.with_structured_output(SynthesisOutput)
         self._graph = self._build_graph()
 
-    @staticmethod
-    def _invoke_with_retry(structured_llm, messages, max_attempts: int = 3):
-        """Retry wrapper for structured-output LLM calls.
-
-        GPT OSS 20B on Groq occasionally hallucinates a mismatched tool call during
-        structured output (observed: 'attempted to call tool synthesisOutput which was
-        not in request.tools') - a known reliability quirk of smaller open-weight models
-        under strict function-calling, not a bug in the prompt or schema. Retrying the
-        exact same call has consistently succeeded within 1-2 attempts in practice.
-        """
-        last_error = None
-        for attempt in range(max_attempts):
-            try:
-                return structured_llm.invoke(messages)
-            except Exception as e:
-                last_error = e
-                if attempt < max_attempts - 1:
-                    time.sleep(1.5 * (attempt + 1))
-        raise last_error
-
     def _select_specialists(self, state: BossState) -> dict:
         specialists = {a.value: e.description for a, e in AVAILABLE_SPECIALISTS.items()}
         prompt = build_selection_prompt(state["query"], specialists)
-        result: AgentSelection = self._invoke_with_retry(self._selection_llm, [
+        result: AgentSelection = invoke_with_retry(self._selection_llm, [
             SystemMessage(content=SELECTION_SYSTEM_PROMPT),
             HumanMessage(content=prompt),
         ])
@@ -78,8 +58,13 @@ class BossAgent:
         return "run_specialists" if state["selected_agents"] else "no_relevant_agents"
 
     def _run_specialists(self, state: BossState) -> dict:
+        """Runs selected specialists in parallel. A single specialist's failure (e.g. the
+        RAG vector index not being built yet) must not take down the whole session and
+        discard other specialists' already-completed briefings - each future's exception is
+        caught individually and surfaced to synthesis as an explicit gap instead."""
         selected = [a for a in state["selected_agents"] if a in AVAILABLE_SPECIALISTS]
         briefings: list[AgentBriefing] = []
+        failed_specialists: list[str] = []
 
         with ThreadPoolExecutor(max_workers=max(len(selected), 1)) as pool:
             futures = {
@@ -87,14 +72,18 @@ class BossAgent:
                 for agent_type in selected
             }
             for future in as_completed(futures):
-                briefings.append(future.result())
+                agent_type = futures[future]
+                try:
+                    briefings.append(future.result())
+                except Exception as e:
+                    failed_specialists.append(f"{agent_type.value}: {e}")
 
-        return {"briefings": briefings}
+        return {"briefings": briefings, "failed_specialists": failed_specialists}
 
     def _synthesize(self, state: BossState) -> dict:
         briefings_text = _format_briefings(state["briefings"])
-        prompt = build_synthesis_prompt(state["query"], briefings_text)
-        result: SynthesisOutput = self._invoke_with_retry(self._synthesis_llm, [
+        prompt = build_synthesis_prompt(state["query"], briefings_text, state.get("failed_specialists"))
+        result: SynthesisOutput = invoke_with_retry(self._synthesis_llm, [
             SystemMessage(content=SYNTHESIS_SYSTEM_PROMPT),
             HumanMessage(content=prompt),
         ])
@@ -134,10 +123,13 @@ class BossAgent:
 
     def run(self, query: str) -> BoardRecommendation:
         final_state = self._graph.invoke({"query": query})
+        briefings = final_state["briefings"]
         return BoardRecommendation(
             query=query,
-            agents_invoked=final_state["selected_agents"],
-            briefings=final_state["briefings"],
+            # reflects agents that actually SUCCEEDED, not just were selected - a specialist
+            # that failed (see _run_specialists) has no briefing and shouldn't be listed as invoked
+            agents_invoked=[b.agent for b in briefings],
+            briefings=briefings,
             synthesis=final_state["synthesis"],
             dissents=final_state["dissents"],
             confidence_overall=final_state["confidence_overall"],

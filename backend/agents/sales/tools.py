@@ -15,9 +15,15 @@ Data reality notes (flagged explicitly per tool output, not hidden):
    lenses on the same seller.
 4. Olist's order data collection trails off mid-2018 — the final months (Sep/Oct 2018) have
    a handful of orders each versus thousands in every prior month, a collection cutoff
-   artifact, not a real demand collapse. query_revenue_by_period() detects and excludes
-   trailing partial periods from its trend calculation rather than reporting a false decline.
+   artifact, not a real demand collapse. query_revenue_by_period() filters out anything after
+   backend.agents.common.get_analysis_cutoff() (shared with Growth and Risk) rather than
+   reporting a false decline. An earlier version computed this cutoff from the caller's own
+   LIMIT-windowed rows instead of the full order history - with a small enough `periods`
+   argument, the cutoff months could dominate the window and drag the median down with them,
+   letting a real collection-cutoff month slip through as "complete" data. Using the shared
+   full-history-based helper fixes this at the source.
 """
+from backend.agents.common import get_analysis_cutoff
 from backend.db import DatabricksClient
 
 NON_REVENUE_STATUSES = ("'canceled'", "'unavailable'")
@@ -27,8 +33,14 @@ _MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 
 
 def query_revenue_by_period(db: DatabricksClient, period_unit: str = "month", periods: int = 12) -> dict:
-    """Revenue and order count per period (day/week/month), most recent first then sorted ascending."""
+    """Revenue and order count per period (day/week/month), most recent first then sorted ascending.
+
+    Filters out anything after get_analysis_cutoff() BEFORE applying the `periods` LIMIT, so a
+    small `periods` window can never end up dominated by (and therefore blind to) the trailing
+    collection-cutoff months - see the module docstring for the bug this replaced.
+    """
     unit = period_unit if period_unit in ("day", "week", "month") else "month"
+    cutoff = get_analysis_cutoff(db)
     sql = f"""
         SELECT
             date_trunc('{unit}', o.order_purchase_timestamp) AS period,
@@ -37,6 +49,7 @@ def query_revenue_by_period(db: DatabricksClient, period_unit: str = "month", pe
         FROM {db.table('orders')} o
         JOIN {db.table('order_items')} oi ON o.order_id = oi.order_id
         WHERE {_EXCLUDE_CLAUSE}
+          AND o.order_purchase_timestamp < timestamp('{cutoff}')
         GROUP BY 1
         ORDER BY 1 DESC
         LIMIT {int(periods)}
@@ -44,26 +57,13 @@ def query_revenue_by_period(db: DatabricksClient, period_unit: str = "month", pe
     rows = db.query(sql)
     rows.sort(key=lambda r: r["period"])
 
-    # Exclude trailing periods that look like a data-collection cutoff, not real decline:
-    # order_count far below the window's median signals an incomplete final period.
-    counts = sorted(int(r["order_count"]) for r in rows)
-    median_count = counts[len(counts) // 2] if counts else 0
-    complete_rows = list(rows)
-    excluded = []
-    while complete_rows and median_count and int(complete_rows[-1]["order_count"]) < median_count * 0.5:
-        excluded.insert(0, complete_rows.pop())
-
     trend_direction = "flat"
-    if len(complete_rows) >= 2:
-        first, last = float(complete_rows[0]["revenue"]), float(complete_rows[-1]["revenue"])
+    if len(rows) >= 2:
+        first, last = float(rows[0]["revenue"]), float(rows[-1]["revenue"])
         delta_pct = (last - first) / first * 100 if first else 0.0
         trend_direction = "growing" if delta_pct > 5 else "declining" if delta_pct < -5 else "flat"
 
-    result = {"period_unit": unit, "periods": rows, "trend_direction": trend_direction}
-    if excluded:
-        result["excluded_partial_periods"] = excluded
-        result["note"] = f"{len(excluded)} trailing period(s) excluded from trend calc - order count far below the window median, consistent with a data-collection cutoff rather than a real drop"
-    return result
+    return {"period_unit": unit, "periods": rows, "trend_direction": trend_direction, "analysis_cutoff": cutoff}
 
 
 def calculate_aov(db: DatabricksClient, months: int = 12) -> dict:
@@ -91,7 +91,7 @@ def calculate_aov(db: DatabricksClient, months: int = 12) -> dict:
     """
     overall = db.query(overall_sql)[0]["overall_aov"]
 
-    return {"overall_aov": float(overall), "monthly": rows}
+    return {"overall_aov": float(overall or 0.0), "monthly": rows}
 
 
 def sales_by_category(db: DatabricksClient, top_n: int = 10) -> dict:

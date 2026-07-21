@@ -66,19 +66,36 @@ def test_risk_fraud_signal_percentile_threshold_flags_expected_share(db):
 
 
 def test_sales_trailing_period_exclusion_only_excludes_genuinely_low_volume_periods(db):
-    """Regression test for the false-decline bug found while building the Sales agent."""
+    """Regression test for the false-decline bug found while building the Sales agent: no
+    period returned should fall at or after the analysis cutoff."""
     from backend.agents.sales import tools as sales_tools
 
     result = sales_tools.query_revenue_by_period(db)
-    excluded = result.get("excluded_partial_periods", [])
+    cutoff = result["analysis_cutoff"]
 
-    all_counts = sorted(int(p["order_count"]) for p in result["periods"])
-    median_count = all_counts[len(all_counts) // 2]
+    for period in result["periods"]:
+        assert str(period["period"]) < cutoff, (
+            f"period {period['period']} is not before the analysis cutoff {cutoff} - "
+            f"a trailing collection-cutoff period may have leaked into the trend calc"
+        )
 
-    for period in excluded:
-        assert int(period["order_count"]) < median_count * 0.5, (
-            f"period {period['period']} excluded but order_count "
-            f"{period['order_count']} is not far below median {median_count}"
+
+def test_sales_trailing_period_exclusion_holds_with_a_small_periods_window(db):
+    """Regression test for the windowed-median bug: an earlier version computed the cutoff
+    from the caller's own LIMIT-windowed rows, so a small `periods` argument could let the
+    trailing collection-cutoff months (Sep/Oct 2018) dominate the window and drag the median
+    down with them, letting a real cutoff month slip through as "complete" data. Fixed by
+    computing the cutoff from the full order history (backend.agents.common) before any
+    window is applied - this test exercises exactly the small-window case that broke."""
+    from backend.agents.sales import tools as sales_tools
+
+    result = sales_tools.query_revenue_by_period(db, periods=3)
+    cutoff = result["analysis_cutoff"]
+
+    for period in result["periods"]:
+        assert str(period["period"]) < cutoff, (
+            f"period {period['period']} (periods=3 window) is not before the analysis cutoff "
+            f"{cutoff} - the windowed-median bug may have regressed"
         )
 
 

@@ -22,32 +22,15 @@ Data reality notes (flagged explicitly per tool output, not hidden):
 6. customer_churn_prediction() (forward-looking, per-customer risk) is a different lens from
    Sales' repeat_purchase_rate() (historical, aggregate rate) - related but not duplicative.
 """
+from backend.agents.common import get_analysis_cutoff
 from backend.db import DatabricksClient
 
 import numpy as np
 
 
-def _get_analysis_cutoff(db: DatabricksClient) -> str:
-    """Same trailing-partial-period detection used by Sales/Growth - see their tools.py."""
-    sql = f"""
-        SELECT date_trunc('month', order_purchase_timestamp) AS month, COUNT(*) AS n
-        FROM {db.table('orders')}
-        GROUP BY 1 ORDER BY 1
-    """
-    rows = db.query(sql)
-    counts = sorted(int(r["n"]) for r in rows)
-    median_count = counts[len(counts) // 2] if counts else 0
-    complete = list(rows)
-    while complete and median_count and int(complete[-1]["n"]) < median_count * 0.5:
-        complete.pop()
-    if not complete:
-        return "9999-01-01"
-    return str(complete[-1]["month"])
-
-
 def cancellation_trend(db: DatabricksClient, months: int = 12) -> dict:
     """Monthly cancellation rate and trend direction."""
-    cutoff = _get_analysis_cutoff(db)
+    cutoff = get_analysis_cutoff(db)
     sql = f"""
         SELECT
             date_trunc('month', order_purchase_timestamp) AS month,
@@ -92,7 +75,7 @@ def flag_payment_disputes(db: DatabricksClient) -> dict:
 
 def seller_churn_risk(db: DatabricksClient, inactive_months_threshold: int = 6) -> dict:
     """Sellers with no orders in the last N months relative to the analysis cutoff."""
-    cutoff = _get_analysis_cutoff(db)
+    cutoff = get_analysis_cutoff(db)
     sql = f"""
         SELECT oi.seller_id, MAX(o.order_purchase_timestamp) AS last_order_date, COUNT(DISTINCT o.order_id) AS total_orders
         FROM {db.table('order_items')} oi
@@ -185,7 +168,7 @@ def fraud_signal_detection(db: DatabricksClient, percentile_threshold: float = 9
 
 def customer_churn_prediction(db: DatabricksClient, min_orders: int = 2, overdue_multiplier: float = 1.5) -> dict:
     """Repeat customers overdue for their next order, relative to their own historical order gap."""
-    cutoff = _get_analysis_cutoff(db)
+    cutoff = get_analysis_cutoff(db)
     sql = f"""
         SELECT c.customer_unique_id, o.order_purchase_timestamp
         FROM {db.table('orders')} o

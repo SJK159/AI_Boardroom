@@ -8,6 +8,7 @@ class BossState(TypedDict, total=False):
     selected_agents: list[AgentType]
     selection_reasoning: str
     briefings: list[AgentBriefing]
+    failed_specialists: list[str]
     synthesis: str
     dissents: list[Dissent]
     confidence_overall: float
