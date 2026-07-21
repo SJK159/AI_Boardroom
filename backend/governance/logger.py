@@ -10,8 +10,10 @@ Deliberately NOT baked into BossAgent itself - same separation of concerns as Da
 being the only thing that knows SQL and BossAgent not knowing Mongo exists. BossAgent stays a
 pure function of (query -> BoardRecommendation); this class adds persistence around it.
 """
+import logging
 import time
 import uuid
+from typing import Callable
 
 from backend.agents.boss import BossAgent
 from backend.config import settings
@@ -20,20 +22,32 @@ from backend.schemas import GovernanceLog
 
 from .mongo_client import MongoClient
 
+logger = logging.getLogger(__name__)
+
 
 class GovernanceLogger:
     def __init__(self, boss_agent: BossAgent, mongo: MongoClient):
         self.boss_agent = boss_agent
         self.mongo = mongo
 
-    def run_with_logging(self, query: str) -> GovernanceLog:
-        """Runs the boss agent and persists the full session as a GovernanceLog."""
+    def run_with_logging(
+        self,
+        query: str,
+        on_event: Callable[[str, dict], None] | None = None,
+        session_id: str | None = None,
+    ) -> GovernanceLog:
+        """Runs the boss agent and persists the full session as a GovernanceLog.
+
+        Accepts a pre-generated session_id so callers that need the ID before the run
+        completes (e.g. the API layer, to key a WebSocket connection to it) can supply one
+        instead of only learning it after the fact.
+        """
         start = time.perf_counter()
-        recommendation = self.boss_agent.run(query)
+        recommendation = self.boss_agent.run(query, on_event=on_event)
         elapsed_ms = (time.perf_counter() - start) * 1000
 
         log = GovernanceLog(
-            session_id=str(uuid.uuid4()),
+            session_id=session_id or str(uuid.uuid4()),
             user_query=query,
             recommendation=recommendation,
             model_versions={
@@ -42,7 +56,18 @@ class GovernanceLogger:
             },
             total_execution_time_ms=elapsed_ms,
         )
-        self.mongo.insert_governance_log(log.model_dump())
+        # A recommendation that was successfully computed must still reach the caller even if
+        # the governance write itself hits a transient failure (observed: intermittent Atlas
+        # TLS handshake errors, already retried inside MongoClient) - losing a valid board
+        # session over a logging-layer hiccup would be a worse outcome than one unlogged
+        # session, and the failure is surfaced loudly here rather than swallowed silently.
+        try:
+            self.mongo.insert_governance_log(log.model_dump())
+        except Exception:
+            logger.exception(
+                "Failed to persist governance log for session %s - recommendation still "
+                "returned to caller, but this session has NO audit trail.", log.session_id,
+            )
         return log
 
     def record_human_decision(self, session_id: str, decision: str, notes: str | None = None) -> bool:

@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Callable
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
@@ -18,6 +19,14 @@ from .prompts import (
 )
 from .registry import AVAILABLE_SPECIALISTS
 from .state import BossState
+
+
+def _emit(state: BossState, event_type: str, data: dict) -> None:
+    """Fires the per-invocation progress callback if the caller supplied one (the API layer
+    does, for live agent-status streaming); a no-op for direct/test callers that don't."""
+    on_event = state.get("on_event")
+    if on_event is not None:
+        on_event(event_type, data)
 
 
 def _format_briefings(briefings: list[AgentBriefing]) -> str:
@@ -52,6 +61,10 @@ class BossAgent:
             SystemMessage(content=SELECTION_SYSTEM_PROMPT),
             HumanMessage(content=prompt),
         ])
+        _emit(state, "specialists_selected", {
+            "agents": [a.value for a in result.selected_agents],
+            "reasoning": result.reasoning,
+        })
         return {"selected_agents": result.selected_agents, "selection_reasoning": result.reasoning}
 
     def _has_selected_agents(self, state: BossState) -> str:
@@ -66,6 +79,9 @@ class BossAgent:
         briefings: list[AgentBriefing] = []
         failed_specialists: list[str] = []
 
+        for agent_type in selected:
+            _emit(state, "specialist_started", {"agent": agent_type.value})
+
         with ThreadPoolExecutor(max_workers=max(len(selected), 1)) as pool:
             futures = {
                 pool.submit(AVAILABLE_SPECIALISTS[agent_type].agent_class(self.db).run, state["query"]): agent_type
@@ -74,9 +90,15 @@ class BossAgent:
             for future in as_completed(futures):
                 agent_type = futures[future]
                 try:
-                    briefings.append(future.result())
+                    briefing = future.result()
+                    briefings.append(briefing)
+                    _emit(state, "specialist_completed", {
+                        "agent": agent_type.value,
+                        "finding_count": len(briefing.findings),
+                    })
                 except Exception as e:
                     failed_specialists.append(f"{agent_type.value}: {e}")
+                    _emit(state, "specialist_failed", {"agent": agent_type.value, "error": str(e)})
 
         return {"briefings": briefings, "failed_specialists": failed_specialists}
 
@@ -87,6 +109,7 @@ class BossAgent:
             SystemMessage(content=SYNTHESIS_SYSTEM_PROMPT),
             HumanMessage(content=prompt),
         ])
+        _emit(state, "synthesis_ready", {"synthesis": result.synthesis})
         return {
             "synthesis": result.synthesis,
             "dissents": result.dissents,
@@ -95,6 +118,9 @@ class BossAgent:
         }
 
     def _no_relevant_agents(self, state: BossState) -> dict:
+        _emit(state, "synthesis_ready", {
+            "synthesis": "No specialist agent currently available is relevant to this query.",
+        })
         return {
             "briefings": [],
             "synthesis": "No specialist agent currently available is relevant to this query.",
@@ -121,8 +147,8 @@ class BossAgent:
         graph.add_edge("no_relevant_agents", END)
         return graph.compile()
 
-    def run(self, query: str) -> BoardRecommendation:
-        final_state = self._graph.invoke({"query": query})
+    def run(self, query: str, on_event: Callable[[str, dict], None] | None = None) -> BoardRecommendation:
+        final_state = self._graph.invoke({"query": query, "on_event": on_event})
         briefings = final_state["briefings"]
         return BoardRecommendation(
             query=query,
